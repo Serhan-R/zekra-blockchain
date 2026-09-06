@@ -1,0 +1,820 @@
+<title>ZEKRA Challenge Integration</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:wght@400;500;600;700&display=swap">
+<style>
+  :root {
+    --ink:        #131A24;
+    --ink-2:      #3A4756;
+    --muted:      #5E6C7A;
+    --faint:      #8695A3;
+    --paper:      #F4F6F8;
+    --surface:    #FFFFFF;
+    --rule:       #DCE3E9;
+    --rule-soft:  #E9EEF2;
+    --accent:     #1B5E7E;
+    --accent-dim: #E3EDF2;
+    --pass:       #1F7A5C;
+    --pass-bg:    #E3F0EA;
+    --hold:       #8A6D1F;
+    --hold-bg:    #F5EDD9;
+    --fail:       #A33A32;
+    --fail-bg:    #F7E5E3;
+    --code-bg:    #EFF3F6;
+
+    --f-serif: "IBM Plex Serif", Georgia, "Times New Roman", serif;
+    --f-sans:  "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --f-mono:  "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+    --measure: 68ch;
+    --wide: 940px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ink:        #E4EAF0;
+      --ink-2:      #B9C6D2;
+      --muted:      #94A5B4;
+      --faint:      #6E8092;
+      --paper:      #0F141B;
+      --surface:    #161E27;
+      --rule:       #2A3642;
+      --rule-soft:  #212B36;
+      --accent:     #6FB2CC;
+      --accent-dim: #17303B;
+      --pass:       #5CBF97;
+      --pass-bg:    #122B22;
+      --hold:       #D4B056;
+      --hold-bg:    #2E2612;
+      --fail:       #E08279;
+      --fail-bg:    #331A18;
+      --code-bg:    #1B242E;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ink:        #E4EAF0;
+    --ink-2:      #B9C6D2;
+    --muted:      #94A5B4;
+    --faint:      #6E8092;
+    --paper:      #0F141B;
+    --surface:    #161E27;
+    --rule:       #2A3642;
+    --rule-soft:  #212B36;
+    --accent:     #6FB2CC;
+    --accent-dim: #17303B;
+    --pass:       #5CBF97;
+    --pass-bg:    #122B22;
+    --hold:       #D4B056;
+    --hold-bg:    #2E2612;
+    --fail:       #E08279;
+    --fail-bg:    #331A18;
+    --code-bg:    #1B242E;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--f-sans);
+    font-size: 16px;
+    line-height: 1.65;
+    margin: 0;
+    padding: 0 24px 96px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap { max-width: var(--wide); margin: 0 auto; }
+  .col  { max-width: var(--measure); }
+
+  /* ---------- masthead ---------- */
+  .mast {
+    padding: 64px 0 34px;
+    border-bottom: 2px solid var(--ink);
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+  }
+  .eyebrow {
+    font-family: var(--f-mono);
+    font-size: 11.5px;
+    font-weight: 500;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  h1 {
+    font-family: var(--f-serif);
+    font-weight: 600;
+    font-size: clamp(34px, 5.2vw, 50px);
+    line-height: 1.1;
+    letter-spacing: -0.02em;
+    text-wrap: balance;
+    margin: 0;
+  }
+  .standfirst {
+    font-family: var(--f-serif);
+    font-size: 19px;
+    line-height: 1.55;
+    color: var(--ink-2);
+    max-width: 62ch;
+    margin: 0;
+  }
+  .byline {
+    font-family: var(--f-mono);
+    font-size: 12.5px;
+    color: var(--faint);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 20px;
+  }
+
+  /* ---------- status strip ---------- */
+  .status {
+    margin: 34px 0 0;
+    border: 1px solid var(--rule);
+    background: var(--surface);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .status-hd {
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--rule);
+    font-family: var(--f-mono);
+    font-size: 11.5px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .phases { display: grid; grid-template-columns: repeat(auto-fit, minmax(168px, 1fr)); }
+  .phase {
+    padding: 18px 20px 20px;
+    border-right: 1px solid var(--rule-soft);
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+  }
+  .phase:last-child { border-right: 0; }
+  .phase-n {
+    font-family: var(--f-mono);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    color: var(--faint);
+    text-transform: uppercase;
+  }
+  .phase-name {
+    font-size: 14.5px;
+    font-weight: 500;
+    line-height: 1.35;
+    color: var(--ink);
+  }
+
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    align-self: flex-start;
+    font-family: var(--f-mono);
+    font-size: 10.5px;
+    font-weight: 500;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    padding: 3px 9px;
+    border-radius: 2px;
+    white-space: nowrap;
+  }
+  .chip::before {
+    content: "";
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+    flex: none;
+  }
+  .chip.done { color: var(--pass); background: var(--pass-bg); }
+  .chip.part { color: var(--hold); background: var(--hold-bg); }
+  .chip.open { color: var(--fail); background: var(--fail-bg); }
+
+  /* ---------- sections ---------- */
+  section { margin-top: 60px; }
+  h2 {
+    font-family: var(--f-serif);
+    font-size: 27px;
+    font-weight: 600;
+    line-height: 1.22;
+    letter-spacing: -0.012em;
+    text-wrap: balance;
+    margin: 0 0 22px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--rule);
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+  }
+  h2 .num {
+    font-family: var(--f-mono);
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--accent);
+    flex: none;
+  }
+  h3 {
+    font-family: var(--f-sans);
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    margin: 34px 0 12px;
+    color: var(--ink);
+  }
+  p { margin: 0 0 16px; max-width: var(--measure); }
+  ul { margin: 0 0 16px; padding-left: 20px; max-width: var(--measure); }
+  li { margin-bottom: 8px; }
+  li::marker { color: var(--faint); }
+  strong { font-weight: 600; color: var(--ink); }
+  em { font-style: italic; }
+
+  code {
+    font-family: var(--f-mono);
+    font-size: 0.875em;
+    background: var(--code-bg);
+    padding: 1.5px 5px;
+    border-radius: 2px;
+    color: var(--ink);
+    word-break: break-word;
+  }
+  pre {
+    font-family: var(--f-mono);
+    font-size: 13px;
+    line-height: 1.6;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-left: 2px solid var(--accent);
+    border-radius: 2px;
+    padding: 16px 18px;
+    overflow-x: auto;
+    margin: 0 0 20px;
+  }
+  pre code { background: none; padding: 0; font-size: inherit; }
+  .cm { color: var(--faint); }
+
+  /* ---------- tables ---------- */
+  .tw { overflow-x: auto; margin: 0 0 22px; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14.5px;
+    font-variant-numeric: tabular-nums;
+    min-width: 520px;
+  }
+  th {
+    text-align: left;
+    font-family: var(--f-mono);
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding: 0 16px 9px 0;
+    border-bottom: 1px solid var(--ink);
+    vertical-align: bottom;
+  }
+  td {
+    padding: 11px 16px 11px 0;
+    border-bottom: 1px solid var(--rule-soft);
+    vertical-align: top;
+    line-height: 1.5;
+  }
+  tr td:last-child, tr th:last-child { padding-right: 0; }
+  td code { font-size: 0.86em; }
+
+  /* ---------- callout ---------- */
+  .note {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-left: 2px solid var(--accent);
+    border-radius: 2px;
+    padding: 20px 22px;
+    margin: 0 0 22px;
+    max-width: var(--measure);
+  }
+  .note .lbl {
+    font-family: var(--f-mono);
+    font-size: 11px;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--accent);
+    display: block;
+    margin-bottom: 9px;
+  }
+  .note p:last-child { margin-bottom: 0; }
+
+  .warn { border-left-color: var(--fail); }
+  .warn .lbl { color: var(--fail); }
+
+  /* ---------- key/value evidence rows ---------- */
+  .ev { display: flex; flex-direction: column; gap: 0; margin: 0 0 22px; }
+  .ev-row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 12px 20px;
+    align-items: baseline;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--rule-soft);
+  }
+  .ev-row:first-child { border-top: 1px solid var(--ink); }
+  .ev-k { font-size: 14.5px; line-height: 1.45; }
+  .ev-v {
+    font-family: var(--f-mono);
+    font-size: 12.5px;
+    color: var(--muted);
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .tally {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin: 0 0 22px;
+  }
+  .tally div {
+    border: 1px solid var(--rule);
+    background: var(--surface);
+    border-radius: 2px;
+    padding: 12px 16px;
+    min-width: 132px;
+  }
+  .tally b {
+    display: block;
+    font-family: var(--f-mono);
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--pass);
+    letter-spacing: -0.01em;
+  }
+  .tally span {
+    font-size: 12.5px;
+    color: var(--muted);
+    line-height: 1.4;
+    display: block;
+    margin-top: 3px;
+  }
+
+  footer {
+    margin-top: 68px;
+    padding-top: 22px;
+    border-top: 1px solid var(--rule);
+    font-family: var(--f-mono);
+    font-size: 12px;
+    color: var(--faint);
+    max-width: var(--measure);
+    line-height: 1.7;
+  }
+
+  a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:focus-visible, :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  @media (max-width: 640px) {
+    body { padding: 0 18px 64px; font-size: 15.5px; }
+    .mast { padding-top: 44px; }
+    .phase { border-right: 0; border-bottom: 1px solid var(--rule-soft); }
+    h2 { font-size: 23px; flex-direction: column; gap: 4px; }
+    .ev-row { grid-template-columns: 1fr; }
+    .ev-v { text-align: left; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="mast">
+    <div class="eyebrow">Implementation report</div>
+    <h1>ZEKRA Challenge Integration</h1>
+    <p class="standfirst">
+      Merging zero-knowledge control-flow attestation with the Flask blockchain, so that
+      attestation becomes a challenge/response exchange recorded on-chain and judged
+      independently by every node.
+    </p>
+    <div class="byline">
+      <span>Debes et al., ASIA CCS '23</span>
+      <span>6 nodes / 2 Jetsons</span>
+      <span>192.168.20.30 &middot; 192.168.20.26</span>
+    </div>
+  </header>
+
+  <div class="status">
+    <div class="status-hd">
+      <span>Implementation status</span>
+      <span>Verification validated against real Groth16 proofs</span>
+    </div>
+    <div class="phases">
+      <div class="phase">
+        <span class="phase-n">Phase 0</span>
+        <span class="phase-name">Public-input format decoded</span>
+        <span class="chip done">Done</span>
+      </div>
+      <div class="phase">
+        <span class="phase-n">Phase 1</span>
+        <span class="phase-name">Challenge plumbing, checks 2 + 3</span>
+        <span class="chip done">Done</span>
+      </div>
+      <div class="phase">
+        <span class="phase-n">Phase 2</span>
+        <span class="phase-name">Binding gap closed (Option A)</span>
+        <span class="chip done">Done</span>
+      </div>
+      <div class="phase">
+        <span class="phase-n">Phase 3</span>
+        <span class="phase-name">Real proving pipeline</span>
+        <span class="chip part">1 of 3 steps untested</span>
+      </div>
+      <div class="phase">
+        <span class="phase-n">Phase 4</span>
+        <span class="phase-name">Check 1 — path authenticity</span>
+        <span class="chip done">Done</span>
+      </div>
+    </div>
+  </div>
+
+  <section>
+    <h2><span class="num">01</span> Summary</h2>
+    <ul>
+      <li>A node challenges another to prove it executed a program correctly. The challenge is
+        <code>{@P, nce}</code> — a program identifier and a fresh nonce — and lands on-chain
+        <em>before</em> any proof exists.</li>
+      <li>The challenged node produces a zk-SNARK proof that its execution path is legal for the
+        program's control-flow graph, <strong>without revealing the path or the CFG</strong>.</li>
+      <li>Every other node independently runs all three of the paper's verification checks and
+        publishes its own verdict. This is what the blockchain adds: the paper has one verifier,
+        here we get <em>N</em> mutually distrusting ones plus an immutable audit trail.</li>
+      <li>A node that cannot judge — missing reference, wrong verification key, verifier crash —
+        <strong>abstains</strong> rather than guessing. Abstention never blocks consensus.</li>
+    </ul>
+    <p>
+      The single most important design decision is <strong>Option A</strong> (§4): a verifier never
+      accepts public inputs from the party it is verifying, and instead reconstructs them from the
+      signed on-chain reference plus the on-chain nonce. This is now proven byte-exact against real
+      prover output.
+    </p>
+  </section>
+
+  <section>
+    <h2><span class="num">02</span> The protocol as implemented</h2>
+
+    <h3>The challenge</h3>
+    <pre><code>Verifier  ---->  Prover        { @P , nce }</code></pre>
+    <p>
+      <code>@P</code> identifies the program, or the <em>region</em> of a program, to attest.
+      <code>nce</code> is a fresh 254-bit nonce whose only job is <strong>freshness</strong>: it is
+      hashed into the execution-path commitment and surfaces as a public circuit input, so a verifier
+      can distinguish a fresh attestation from a replayed one.
+    </p>
+    <p>
+      Entry and exit nodes are <strong>not</strong> sent. They are reference values the verifier
+      already holds and checks against what comes back — travelling in the opposite direction, inside
+      the proof's public inputs.
+    </p>
+
+    <h3>What the verifier holds in advance</h3>
+    <pre><code>vk_C , tpk , { @P , h₁ = H(CFG‖r₁) , h₃ = H(M‖r₃) , n▷ , n◄ }</code></pre>
+    <p>
+      <code>r₁</code> and <code>r₃</code> are <strong>secrets</strong> held with the program
+      materials, never given to verifiers, who only ever see the digests. This is what keeps the CFG
+      private while still letting a party with no access to the program verify a proof about it.
+    </p>
+
+    <h3>The three checks</h3>
+    <pre><code>Accept  iff
+  (1)  Vf( Sig , h₂ , tpk ) = 1                             <span class="cm">-- path came from a real tracer</span>
+  (2)  x \ {h₂} == { H(CFG‖r₁) , H(M‖r₃) , n▷ , n◄ , nce }  <span class="cm">-- the claim is the right claim</span>
+  (3)  Verify( vk_C , x , y , π ) = 1                       <span class="cm">-- the SNARK</span></code></pre>
+    <p>
+      The original integration implemented <strong>only check (3)</strong>. That is not enough: an old
+      proof from a previous attestation passes (3) perfectly — it is a valid proof of a <em>stale</em>
+      statement. Check (2) is the entire anti-replay mechanism. All three are now implemented.
+    </p>
+
+    <h3>Mapping to the ZEKRA tooling</h3>
+    <div class="tw">
+      <table>
+        <thead><tr><th>Paper</th><th><code>circuit_input_formatter.py</code></th></tr></thead>
+        <tbody>
+          <tr><td><code>nce</code></td><td><code>--nonce-verifier</code></td></tr>
+          <tr><td><code>r₂</code> — path blinding, fresh per attestation</td><td><code>--nonce-path</code></td></tr>
+          <tr><td><code>r₃</code> — translator blinding, program secret</td><td><code>--nonce-translator</code></td></tr>
+          <tr><td><code>r₁</code> — CFG blinding, program secret</td><td><code>--nonce-adjlist</code></td></tr>
+          <tr><td><code>n▷</code> / <code>n◄</code></td><td><code>in_initial_node</code> / <code>in_final_node</code></td></tr>
+          <tr><td><code>h₁ = H(CFG‖r₁)</code></td><td><code>in_encoded_adjlist_digest</code></td></tr>
+          <tr><td><code>h₂ = H(EP‖nce‖r₂)</code></td><td><code>in_recorded_path_digest</code></td></tr>
+          <tr><td><code>h₃ = H(M‖r₃)</code></td><td><code>in_translator_digest</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="num">03</span> Role mapping onto the blockchain</h2>
+    <div class="tw">
+      <table>
+        <thead><tr><th>ZEKRA role</th><th>Blockchain</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>Verifier</td>
+            <td>the challenger <strong>and every other node</strong></td>
+            <td>The paper has one untrusted verifier; here <em>N</em> nodes independently run checks (1)–(3) and each records a verdict.</td>
+          </tr>
+          <tr>
+            <td>Prover</td>
+            <td>the challenged node</td>
+            <td>Prover and Worker are collapsed into one node — the Jetsons are not resource-constrained. Splitting the Worker out is a natural extension and arguably the more interesting blockchain angle.</td>
+          </tr>
+          <tr>
+            <td>Network operator</td>
+            <td>out of band</td>
+            <td>Runs <code>KeyGen</code> once; <code>vk_C</code> is distributed as a file and its digest pinned in the reference.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      <strong>Role exhaustion.</strong> A node cannot verify its own work, so the number of
+      <em>independent</em> verifiers is <code>N − |{challenger, responder, miner}|</code>. On a
+      three-node network that is zero, which is why local testing uses five nodes. This caused real
+      confusion during earlier testing — a silent third node looked like a bug, but was simply the
+      miner.
+    </p>
+  </section>
+
+  <section>
+    <h2><span class="num">04</span> Option A — the verifier rebuilds the public inputs</h2>
+    <p>
+      Letting the responder ship its own <code>primary_input.bin</code> is unsound. A dishonest
+      responder could declare correct values in JSON while shipping a binary encoding <em>different</em>
+      ones: check (3) passes (the proof genuinely matches the shipped file), check (2) passes (the
+      declared values look right), and the two are unrelated.
+    </p>
+    <p><strong>Option A closes this structurally.</strong> The verifier discards anything the responder
+      says about the claim and builds <code>primary_input.bin</code> itself:</p>
+    <pre><code>n▷ , n◄ , h₁ , h₃   <span class="cm">&lt;- the authority-signed on-chain reference</span>
+nce                 <span class="cm">&lt;- the nonce on the request transaction, on-chain</span>
+h₂                  <span class="cm">&lt;- the responder (the one value that legitimately comes from it)</span></code></pre>
+    <p>
+      If the proof was generated for any other statement, check (3) fails. <strong>Check (2) therefore
+      cannot be bypassed, because a lying responder never gets to state the claim.</strong>
+    </p>
+    <p>
+      <code>h₂</code> being responder-supplied is correct: it is <code>H(EP‖nce‖r₂)</code>, the
+      commitment to the secret execution path. It is precisely what is being attested, and precisely
+      what check (1)'s signature covers.
+    </p>
+
+    <h3>The serialization, confirmed empirically</h3>
+    <p>
+      <code>primary_input.bin</code> is an ASCII count, a newline, then <em>N</em> × 32-byte
+      little-endian field elements in <strong>Montgomery form</strong>
+      (<code>a·R mod p</code>, <code>R = 2²⁵⁶ mod p</code>), ordered:
+    </p>
+    <pre><code>[ 1 , n▷ , n◄ , nce , h₁ , h₂ , h₃ ]</code></pre>
+    <p>
+      This was recovered by decoding real prover output, not from documentation.
+      <strong>Verified:</strong> a reconstruction from the reference values is byte-identical to what
+      <code>run_prover_raw</code> emitted, for all three test proofs.
+    </p>
+  </section>
+
+  <section>
+    <h2><span class="num">05</span> Data model</h2>
+
+    <h3>Reference material — authority-signed, published on-chain</h3>
+    <pre><code>{
+  "reference": {
+    "program_id": "crc32",
+    "h1": "...", "h3": "...",
+    "entry_node": 3, "exit_node": 41,
+    "vk_sha256": "&lt;sha256 of verification_key.bin&gt;",
+    "circuit": {
+      "adjlist_len": 64, "adjlist_levels": 9, "path_len": 128,
+      "stack_depth": 8, "label_bitwidth": 7,
+      "bucket_bitwidth": 4, "address_bitwidth": 32,
+      "pruned": true
+    }
+  },
+  "authority_pubkey": "&lt;ed25519 hex&gt;",
+  "authority_sig": "&lt;ed25519 hex&gt;"
+}</code></pre>
+    <p>Rules, all implemented:</p>
+    <ul>
+      <li><strong>Ed25519-signed by a program authority.</strong> A node ignores references signed by
+        anyone other than the authority it is configured to trust.</li>
+      <li><strong>First valid reference for a <code>program_id</code> wins.</strong> A later
+        transaction cannot redefine a program out from under existing attestations.</li>
+      <li><strong>Circuit parameters are signed.</strong> <code>h₁</code> depends on adjacency-list
+        padding and the encoding bitwidths, not only on the CFG — resize the circuit and
+        <code>h₁</code> must be republished. Pinning the parameters is what makes that detectable.</li>
+      <li><strong><code>vk_sha256</code> is enforced.</strong> A node holding a verification key other
+        than the one the reference was issued against would reject every honest proof; it abstains
+        instead, so its own misconfiguration cannot slander an honest prover.</li>
+    </ul>
+    <p>
+      On-chain rather than a config file: immutable, timestamped, and identical for every verifier by
+      construction. Config files drift per node, and this codebase has already demonstrated how
+      silently divergent per-node state behaves.
+    </p>
+
+    <h3>Challenge and response</h3>
+    <p>
+      The challenge is a <code>request</code> transaction carrying <code>program_id</code> and the
+      nonce in <code>function_parameter</code>. The response carries <code>h2</code>,
+      <code>proof_b64</code>, the prover's public key, and a signature over a canonical binding of
+      <code>{program_id, request_hash, nonce, h2}</code>.
+    </p>
+    <p><strong>There is no <code>primary_input_b64</code>. Its absence is the point.</strong></p>
+    <p>
+      Two dedup notes: content-hash dedup cannot detect duplicate <em>responses</em>, because Groth16
+      is randomized and two honest proofs of the same statement differ byte-wise — parent-based dedup
+      is used instead. A nonce-reuse guard rejects a challenge whose nonce already appeared on-chain.
+    </p>
+  </section>
+
+  <section>
+    <h2><span class="num">06</span> CFG pruning — scope, and the authority's responsibility</h2>
+    <p>
+      <code>prune_cfg.py</code> reduces a CFG before circuit compilation. Pruning changes the adjacency
+      list and the translator, therefore it changes <code>h₁</code> and <code>h₃</code>, therefore the
+      pruned artifacts are part of the <strong>signed program definition</strong> — not a local choice
+      a prover may make. A prover that pruned locally would compute digests that do not match the
+      reference, and <code>_prove_real()</code> aborts on exactly that mismatch. The reference carries
+      an optional <code>circuit.pruned</code> flag so the prover formats the same files the authority
+      did.
+    </p>
+    <p>
+      The prover needs no additional out-of-band knowledge: the tracer and translator shipped with the
+      program materials already emit paths in the pruned label space. Nothing new is leaked either —
+      the reference already publishes circuit dimensions (<code>adjlist_len</code>,
+      <code>path_len</code>), which reveal about as much as the pruned bit does, and the CFG itself
+      remains behind a hash.
+    </p>
+
+    <div class="note warn">
+      <span class="lbl">Finding — the pruning mode is security-critical, and verifiers cannot see it</span>
+      <p>
+        A verifier only ever sees <code>h₁</code>, a hash. Nothing in the protocol distinguishes a
+        <code>bidir</code> slice from a <code>path</code> slice. The soundness of every attestation for
+        a program therefore rests entirely on the authority having pruned correctly — which is
+        precisely why the pruned CFG must come from the authority rather than from provers.
+      </p>
+    </div>
+
+    <div class="tw">
+      <table>
+        <thead><tr><th>Mode</th><th>Keeps</th><th>Effect on attestation</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><code>path</code></td>
+            <td>only the nodes and edges of one recorded trace</td>
+            <td><strong style="color:var(--fail)">Severely weakened.</strong> The attested CFG becomes the trace itself, so the forward-edge check degenerates to "execution used edges seen in one earlier run."</td>
+          </tr>
+          <tr>
+            <td><code>forward</code></td>
+            <td>everything forward-reachable from the entry</td>
+            <td>Conservative, safe</td>
+          </tr>
+          <tr>
+            <td><code>bidir</code> <em>(default)</em></td>
+            <td>nodes both reachable from entry <strong>and</strong> able to reach exit</td>
+            <td><strong style="color:var(--pass)">Correct choice.</strong> Removes only code that can never appear in a valid entry→exit execution, preserving every branch a different input could legitimately take.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>
+      <strong>Pruning also narrows what is attested.</strong> If a CFG is pruned to a region of
+      interest, control-flow hijacking <em>outside</em> that region produces a perfectly valid proof.
+      This matches the paper — the attested region is normally a subset of the binary, e.g. one
+      security-critical function — but it is a deliberate scope decision that should be recorded per
+      program rather than inherited from whatever the extractor happened to emit.
+    </p>
+
+    <div class="note">
+      <span class="lbl">Recommendation — open decision</span>
+      <p>
+        Widen <code>circuit.pruned</code> from a boolean into a signed declaration:
+        <code>{"mode": "bidir", "region": "&lt;name&gt;"}</code>. It cannot be <em>verified</em> by a
+        verifier, but because the reference is authority-signed and immutable it becomes an
+        <em>accountable</em> declaration — an auditor can see what security scope each program was
+        registered under. One-line change; flagged as a decision rather than made unilaterally.
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="num">07</span> What is proven, and by what evidence</h2>
+
+    <div class="tally">
+      <div><b>8 / 8</b><span>real-mode, genuine Groth16</span></div>
+      <div><b>34 / 34</b><span>unit</span></div>
+      <div><b>10 / 10</b><span>end-to-end, 5 nodes</span></div>
+      <div><b>3 / 3</b><span>byte-exact reconstructions</span></div>
+    </div>
+
+    <div class="ev">
+      <div class="ev-row"><span class="ev-k">Honest attestations verify</span><span class="ev-v">3/3 real proofs → correct</span></div>
+      <div class="ev-row"><span class="ev-k">Verifier reconstruction is exact</span><span class="ev-v">byte-identical to prover output</span></div>
+      <div class="ev-row"><span class="ev-k"><strong>Replay is dead</strong> — same proof and <code>h₂</code> under a fresh nonce</span><span class="ev-v">REJECTED by real libsnark</span></div>
+      <div class="ev-row"><span class="ev-k">Forged or tampered signatures caught</span><span class="ev-v">check (1), before the SNARK</span></div>
+      <div class="ev-row"><span class="ev-k">Response from a node the challenge did not address</span><span class="ev-v">incorrect</span></div>
+      <div class="ev-row"><span class="ev-k">Misconfiguration does not slander an honest prover</span><span class="ev-v">wrong vk → abstain</span></div>
+      <div class="ev-row"><span class="ev-k">Abstention does not block consensus</span><span class="ev-v">all nodes adopt the chain</span></div>
+    </div>
+
+    <h3>The one untested link</h3>
+    <p>
+      <code>_prove_real()</code> has three steps: format inputs → generate the witness in Java → prove.
+      Steps 1 and 3 are exercised; <strong>step 2 is not</strong>, because
+      <code>compile_circuit.py</code> bakes the input and output paths into the Java source and needs a
+      JDK, and the available VM has only a JRE.
+    </p>
+    <p>
+      The design consequence: the circuit is compiled <strong>once</strong> against a fixed working
+      directory, and each attestation rewrites inputs there and re-runs the already-compiled class.
+      Closing this out needs one compile on a node with a JDK. It is a provisioning step, not a
+      security gap — a misconfigured prover produces no witness and therefore no proof, and an absent
+      proof is not a false attestation.
+    </p>
+
+    <h3>Defects found while wiring the real prover</h3>
+    <p>Recorded because both were caught by rechecking rather than by testing the happy path.</p>
+    <ul>
+      <li><code>_prove_real()</code> used <code>sys.executable</code> with <code>sys</code> never
+        imported — a guaranteed <code>NameError</code> the first time any node attempted to prove.</li>
+      <li><strong>Pruned-CFG programs were unprovable.</strong> Nothing told the prover which CFG
+        variant the authority had signed, so the formatter read the wrong files and produced digests
+        that could never match. Not a security hole — the <code>h₁</code>/<code>h₃</code> cross-check
+        refused to proceed — but it made a whole class of program impossible to attest.</li>
+    </ul>
+    <p>
+      A third is worth recording as a <em>testing</em> lesson: the first real-mode run reported four
+      attacks "caught" that were in fact all dying on a malformed request before reaching the check
+      under test — a false green. The suite now asserts the <em>reason</em> for each rejection, not
+      just the verdict.
+    </p>
+  </section>
+
+  <section>
+    <h2><span class="num">08</span> Known gaps</h2>
+    <p>Full list in <code>ISSUES.md</code> (13 entries). The ones that matter for attestation:</p>
+    <div class="tw">
+      <table>
+        <thead><tr><th>#</th><th>Gap</th><th>Consequence</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>10</td>
+            <td>Only the first response in a block is verified</td>
+            <td>A second attestation riding in the same block is adopted into permanent history unverified. Deliberately deferred; the fix is to verify every response in the block.</td>
+          </tr>
+          <tr>
+            <td>11</td>
+            <td>Licensing is not enforced</td>
+            <td>Any node holding program materials may attest; nothing checks it was <em>authorised</em> to. The paper notes (§5) that anyone knowing a CFG can identify satisfying paths, so leaked materials mean valid-looking attestations. Currently mitigated only by distribution discipline.</td>
+          </tr>
+          <tr>
+            <td>3</td>
+            <td>No consensus rule behind verdicts</td>
+            <td>Verdicts are recorded, but nothing aggregates them into a decision.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="num">09</span> Suggested next steps</h2>
+    <div class="tw">
+      <table>
+        <thead><tr><th>Step</th><th>Kind</th></tr></thead>
+        <tbody>
+          <tr><td>One-time circuit compile on a JDK node, closing the last untested link in <code>_prove_real()</code></td><td>Engineering</td></tr>
+          <tr><td>Decide the pruning declaration (§6) — cheap, and it makes each program's security scope auditable</td><td>Decision</td></tr>
+          <tr><td><strong>Enforce licensing (#11)</strong> by listing authorised prover keys in the signed reference — the largest remaining security gap</td><td>Research</td></tr>
+          <tr><td>Verify every response in a block (#10)</td><td>Engineering</td></tr>
+          <tr><td><strong>Aggregate verdicts into a consensus rule (#3)</strong> — the point at which this stops being "ZEKRA on a blockchain" and becomes a distributed attestation service</td><td>Research</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer>
+    Source: <code>zekra_integration.py</code>, <code>zekra_authority.py</code>,
+    <code>FlaskBlockChain.py</code>. Suites: <code>test_zekra_real_mode.py</code>,
+    <code>test_zekra_unit.py</code>, <code>local_zekra_test.py</code>.
+    Gaps tracked in <code>ISSUES.md</code>.
+  </footer>
+
+</div>

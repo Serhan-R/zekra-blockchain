@@ -1,0 +1,2 @@
+
+curl -H "Content-Type: application/json" -d '{"nodes" : ["http://localhost:5001"]}' -X POST localhost:5000/nodes/register 
