@@ -8,6 +8,11 @@ from FlaskBlockChain import Blockchain
 
 import socket
 
+# Edit this if your checkout on this Jetson isn't at this path -- it's the
+# only place that needs to change.
+PROJECT_DIR = "/home/jetson/blockchain-python-project"
+
+
 def get_ip_address():
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
         # Connect to an external address (Google's DNS) without sending data
@@ -19,18 +24,33 @@ print(f"My IP Address: {get_ip_address()}")
 # -------------------- Node Management Functions -------------------- #
 def launch_nodes(node_count, base_port=5000):
     processes = []
-    file_path = "/home/jetson/blockchain-python-project/ip_port_list.txt"
+    file_path = f"{PROJECT_DIR}/ip_port_list.txt"
     with open(file_path, "w") as file:
         file.write("")  # Empty the file
     ip = get_ip_address()
-    
+
     for i in range(node_count):
         port = base_port + i
-        log_path = f"/home/jetson/blockchain-python-project/node_{port}.log"
-        command = f'bash -c "python3 -u /home/jetson/blockchain-python-project/FlaskBlockChain.py --port {port} > {log_path} 2>&1 &"'
+        log_path = f"{PROJECT_DIR}/node_{port}.log"
+        command = f'bash -c "python3 -u {PROJECT_DIR}/FlaskBlockChain.py --port {port} > {log_path} 2>&1 &"'
         print(command)
+
+        # Each node signs its responses/verdicts with ZEKRA_KEY_FILE as its
+        # identity key. All nodes launched here share this process's
+        # environment by default, which would give every node on this
+        # Jetson the SAME identity -- a verifier couldn't tell them apart,
+        # and either node could produce a signature that looks like the
+        # other's. Give each one its own key file, per port, so that even
+        # if ZEKRA_KEY_FILE is exported before running this script, each
+        # node still gets a distinct identity.
+        node_env = os.environ.copy()
+        node_env["ZEKRA_KEY_FILE"] = f"{PROJECT_DIR}/node_{port}.pem"
+
         # Execute the command
-        process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        process = subprocess.Popen(
+            command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=node_env,
+        )
         with open(file_path, "a") as file:
             file.write(f"{ip}:{port}\n")
         
@@ -548,4 +568,4 @@ if __name__ == "__main__":
     #else:
     #    print(f"Error launching node on port {port}")
     #    print(stderr.decode())
-        
+    
