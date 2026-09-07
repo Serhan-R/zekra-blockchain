@@ -309,7 +309,11 @@ def inspect_block(block):
             print(f"    Recipient   : {tx['recipient']}")
             print(f"    Type        : {tx['transaction_type']}")
             if 'function_name' in tx:
-                print(f"    Function    : {tx['function_name']}({tx['function_parameter']})")
+                # A reference transaction (zekra_authority.py publish) carries
+                # function_name but no function_parameter -- there's no nonce
+                # on a reference, only on requests/responses. Don't assume
+                # the two always travel together.
+                print(f"    Function    : {tx['function_name']}({tx.get('function_parameter', '')})")
             if 'parent' in tx:
                 print(f"    Parent Hash : {tx['parent']}")
             print(f"    Hash        : {tx['hash']}")
@@ -327,7 +331,9 @@ def display_transaction_pool(transaction_pool):
             print(f"  Recipient   : {transaction['recipient']}")
             print(f"  Type        : {transaction['transaction_type']}")
             if 'function_name' in transaction:
-                print(f"  Function    : {transaction['function_name']}({transaction['function_parameter']})")
+                # Same as inspect_block(): a reference transaction has
+                # function_name but no function_parameter.
+                print(f"  Function    : {transaction['function_name']}({transaction.get('function_parameter', '')})")
             if 'parent' in transaction:
                 print(f"  Parent Hash : {transaction['parent']}")
             print(f"  Hash        : {transaction['hash']}")
