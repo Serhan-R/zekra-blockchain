@@ -314,6 +314,8 @@ def inspect_block(block):
                 # on a reference, only on requests/responses. Don't assume
                 # the two always travel together.
                 print(f"    Function    : {tx['function_name']}({tx.get('function_parameter', '')})")
+            if 'program_id' in tx:
+                print(f"    Program     : {tx['program_id']}")
             if 'parent' in tx:
                 print(f"    Parent Hash : {tx['parent']}")
             print(f"    Hash        : {tx['hash']}")
@@ -334,6 +336,8 @@ def display_transaction_pool(transaction_pool):
                 # Same as inspect_block(): a reference transaction has
                 # function_name but no function_parameter.
                 print(f"  Function    : {transaction['function_name']}({transaction.get('function_parameter', '')})")
+            if 'program_id' in transaction:
+                print(f"  Program     : {transaction['program_id']}")
             if 'parent' in transaction:
                 print(f"  Parent Hash : {transaction['parent']}")
             print(f"  Hash        : {transaction['hash']}")
