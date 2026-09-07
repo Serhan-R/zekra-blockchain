@@ -3,6 +3,7 @@ import requests
 import os
 import psutil
 import random
+import secrets
 import time
 from FlaskBlockChain import Blockchain
 
@@ -228,8 +229,28 @@ def create_transaction(nodes):
         print(f"Node IP: {node['ip']}, Port: {node['port']}, Hash: {node['hash']}")
     sender_hash = input("Enter sender node hash: ").strip()
     recipient_hash = input("Enter recipient node hash: ").strip()
-    function_name = input("Enter function name (e.g., fibonacci, sum_natural): ").strip()
-    function_parameter = input("Enter function parameter (integer): ").strip()
+    function_name = input("Enter function name (e.g., fibonacci, sum_natural, zekra_attestation): ").strip()
+
+    # A ZEKRA challenge needs a program_id (so the prover knows which reference
+    # to answer against -- see zekra_integration.build_zekra_response(), which
+    # otherwise finds no reference and silently refuses to answer) and a nonce
+    # that's fresh and under 254 bits (ISSUES.md #15). Every other function_name
+    # keeps working exactly as before.
+    program_id = None
+    if function_name == "zekra_attestation":
+        program_id = input(
+            "Enter program id (must already be published AND MINED as a signed "
+            "reference, e.g. crc32): "
+        ).strip()
+        function_parameter = input(
+            "Enter nonce (integer, must be fresh -- leave blank to generate one): "
+        ).strip()
+        if not function_parameter:
+            function_parameter = str(secrets.randbelow(2 ** 253))
+            print(f"Generated nonce: {function_parameter}")
+    else:
+        function_parameter = input("Enter function parameter (integer): ").strip()
+
     if not sender_hash or not recipient_hash:
         print("Error: Invalid sender or recipient port.")
         return
@@ -241,6 +262,8 @@ def create_transaction(nodes):
         "function_name": function_name,
         "function_parameter": int(function_parameter),
     }
+    if program_id:
+        transaction_data["program_id"] = program_id
     print(f"Creating transaction: {transaction_data}")
     for node in nodes:
         if node['hash'] == sender_hash:
