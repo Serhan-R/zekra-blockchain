@@ -10,7 +10,7 @@ import socket
 
 # Edit this if your checkout on this Jetson isn't at this path -- it's the
 # only place that needs to change.
-PROJECT_DIR = "/home/jetson/blockchain-python-project"
+PROJECT_DIR = "/home/jetson/ZEKRA_S/zekra-blockchain"
 
 
 def get_ip_address():
