@@ -576,6 +576,8 @@ class Blockchain:
         # Only process blocks added after the last processed block
         new_blocks = self.chain[self.last_processed_block + 1:]
 
+        print(f"[ZEKRA-DEBUG2] last_processed_block={self.last_processed_block} chain_len={len(self.chain)} new_blocks={len(new_blocks)}")
+
         for block in new_blocks:
             for transaction in block['transactions']:
                 print(f"[ZEKRA-DEBUG] tx_type={transaction.get('transaction_type')!r} recipient={transaction.get('recipient')!r} me={node_identifier!r} match={transaction.get('recipient')==node_identifier}")
@@ -651,6 +653,7 @@ class Blockchain:
             return None rather than sending something bogus -- an unanswered
             request is visibly unanswered, whereas a fabricated one is not.
         """
+        print(f"[ZEKRA-DEBUG3] build_zekra_response called for request_hash={request_transaction.get('hash')!r} program_id={request_transaction.get('program_id')!r}")
         program_id = request_transaction.get('program_id')
         nonce = request_transaction.get('function_parameter')
         request_hash = request_transaction.get('hash')
@@ -828,6 +831,7 @@ blockchain = Blockchain()
 @app.route('/mine', methods=['GET'])
 def mine():
     # Only mine if there are pending transactions
+    print(f"[ZEKRA-DEBUG0] /mine called, pool_size={len(blockchain.transaction_pool)}")
     if not blockchain.transaction_pool:
         return jsonify({'message': 'No pending transactions to mine'}), 200
 
