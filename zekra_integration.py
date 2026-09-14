@@ -82,6 +82,19 @@ ZEKRA_AUTHORITY_KEY_FILE authority signing key -- ONLY on the authority node
 ZEKRA_AUTHORITY_PUBKEY   authority public key (hex) that references must carry
 ZEKRA_PROGRAM_DIR        directory of program materials this node can prove for
 ZEKRA_VERIFIER_TIMEOUT   seconds (default 120)
+
+ZEKRA_WORK_DIR           root of per-program compiled-circuit artifacts (real mode,
+                         prover side only). When set, a program's compiled circuit,
+                         proving key, and circuit metadata are looked up under
+                         ZEKRA_WORK_DIR/<program_id>/ instead of the flat
+                         ZEKRA_CIRCUIT_*_DIR / ZEKRA_ARITH / ZEKRA_PROVING_KEY /
+                         ZEKRA_CIRCUIT_METADATA variables below -- see _prove_real()
+                         for the exact layout. Set this to let one node prove for
+                         multiple programs, including ones compiled with different
+                         circuit parameters. Leave unset to keep the old single-WORK
+                         behavior (every program must then share one compiled
+                         circuit, which only works if they were all compiled with
+                         identical circuit parameters).
 """
 
 import base64
@@ -554,27 +567,94 @@ def _prove_real(program_id, nonce, materials, reference):
     across attestations.
     """
     formatter = _env('ZEKRA_FORMATTER')
-    in_dir = _env('ZEKRA_CIRCUIT_INPUT_DIR')
-    out_dir = _env('ZEKRA_CIRCUIT_OUTPUT_DIR')
-    java_cp = _env('ZEKRA_JAVA_CP')
-    java_class = _env('ZEKRA_JAVA_CLASS', 'xjsnark.zekra.zekra')
-    java_home = _env('ZEKRA_JAVA_DIR')          # where bin/ and the jar live
     prover = _env('ZEKRA_PROVER_BIN')
-    arith = _env('ZEKRA_ARITH')
-    pk = _env('ZEKRA_PROVING_KEY')
-    meta = _env('ZEKRA_CIRCUIT_METADATA')
+    java_class = _env('ZEKRA_JAVA_CLASS', 'xjsnark.zekra.zekra')
 
-    missing = [n for n, v in (('ZEKRA_FORMATTER', formatter),
-                              ('ZEKRA_CIRCUIT_INPUT_DIR', in_dir),
-                              ('ZEKRA_CIRCUIT_OUTPUT_DIR', out_dir),
-                              ('ZEKRA_JAVA_CP', java_cp),
-                              ('ZEKRA_PROVER_BIN', prover),
-                              ('ZEKRA_ARITH', arith),
-                              ('ZEKRA_PROVING_KEY', pk),
-                              ('ZEKRA_CIRCUIT_METADATA', meta)) if not v]
-    if missing:
-        raise ZekraProofError(f'real prover is not configured: {", ".join(missing)} '
-                              f'not set')
+    # Per-program compiled-circuit layout, if ZEKRA_WORK_DIR is set:
+    #
+    #   ZEKRA_WORK_DIR/<program_id>/inputs/    -- ZEKRA_CIRCUIT_INPUT_DIR equivalent
+    #   ZEKRA_WORK_DIR/<program_id>/out/       -- ZEKRA_CIRCUIT_OUTPUT_DIR equivalent
+    #   ZEKRA_WORK_DIR/<program_id>/out/zekra.arith
+    #   ZEKRA_WORK_DIR/<program_id>/keys/proving_key_raw.bin
+    #   ZEKRA_WORK_DIR/<program_id>/meta/circuit_metadata.bin
+    #   ZEKRA_WORK_DIR/<program_id>/bin/       -- this program's compiled Java class
+    #                                              (put FIRST on the classpath, ahead
+    #                                              of the shared jsnark backend jar,
+    #                                              so each program's own compiled
+    #                                              xjsnark.zekra.zekra resolves --
+    #                                              same class NAME, different .class
+    #                                              file per program)
+    #
+    # This is what lets one node prove for several programs, even ones compiled
+    # with different circuit parameters (different padding, different bitwidths):
+    # each program gets its own compiled circuit, keys, and metadata, looked up by
+    # program_id rather than assumed to be the one globally configured circuit.
+    #
+    # Without ZEKRA_WORK_DIR, behavior is unchanged from before: a single flat
+    # set of ZEKRA_CIRCUIT_*_DIR / ZEKRA_ARITH / ZEKRA_PROVING_KEY /
+    # ZEKRA_CIRCUIT_METADATA / ZEKRA_JAVA_CP variables, shared by every program --
+    # only correct if every program this node proves for was compiled with
+    # identical circuit parameters.
+    work_root = _env('ZEKRA_WORK_DIR')
+    if work_root:
+        work_dir = os.path.join(work_root, program_id)
+        if not os.path.isdir(work_dir):
+            raise ZekraProofError(
+                f'no compiled circuit for program {program_id!r} under ZEKRA_WORK_DIR '
+                f'-- expected a directory at {work_dir}. Compile and keygen this '
+                f'program into that directory first, or unset ZEKRA_WORK_DIR to fall '
+                f'back to the single shared circuit configured via the flat '
+                f'ZEKRA_CIRCUIT_*/ZEKRA_ARITH/etc. variables instead.')
+
+        in_dir = os.path.join(work_dir, 'inputs')
+        out_dir = os.path.join(work_dir, 'out')
+        arith = os.path.join(out_dir, 'zekra.arith')
+        pk = os.path.join(work_dir, 'keys', 'proving_key_raw.bin')
+        meta = os.path.join(work_dir, 'meta', 'circuit_metadata.bin')
+        java_home = work_dir                        # cwd for the java run
+        program_bin = os.path.join(work_dir, 'bin')
+        shared_cp = _env('ZEKRA_JSNARK_JAR') or _env('ZEKRA_JAVA_CP')
+        java_cp = f'{program_bin}:{shared_cp}' if shared_cp else program_bin
+
+        # Unlike the flat-var branch below, a per-program path is always a
+        # non-empty string once joined (os.path.join never returns ''), so
+        # truthiness alone can't tell us anything is missing here -- we have to
+        # actually check the filesystem, or a wrong/incomplete program_id would
+        # sail past this check and fail much later with a far more confusing error.
+        missing = [n for n, v in (('ZEKRA_FORMATTER', formatter),
+                                  ('ZEKRA_PROVER_BIN', prover),
+                                  ('shared jsnark backend jar '
+                                   '(ZEKRA_JSNARK_JAR or ZEKRA_JAVA_CP)', shared_cp)) if not v]
+        missing += [f'{label} ({path})' for label, path in (
+            ('compiled arith file', arith),
+            ('proving key', pk),
+            ('circuit metadata', meta)) if not os.path.isfile(path)]
+        if not os.path.isdir(program_bin):
+            missing.append(f'compiled Java class directory ({program_bin})')
+        if missing:
+            raise ZekraProofError(
+                f'real prover is not configured for program {program_id!r}: '
+                f'{", ".join(missing)} missing')
+    else:
+        in_dir = _env('ZEKRA_CIRCUIT_INPUT_DIR')
+        out_dir = _env('ZEKRA_CIRCUIT_OUTPUT_DIR')
+        arith = _env('ZEKRA_ARITH')
+        pk = _env('ZEKRA_PROVING_KEY')
+        meta = _env('ZEKRA_CIRCUIT_METADATA')
+        java_home = _env('ZEKRA_JAVA_DIR')          # where bin/ and the jar live
+        java_cp = _env('ZEKRA_JAVA_CP')
+
+        missing = [n for n, v in (('ZEKRA_FORMATTER', formatter),
+                                  ('ZEKRA_CIRCUIT_INPUT_DIR', in_dir),
+                                  ('ZEKRA_CIRCUIT_OUTPUT_DIR', out_dir),
+                                  ('ZEKRA_JAVA_CP', java_cp),
+                                  ('ZEKRA_PROVER_BIN', prover),
+                                  ('ZEKRA_ARITH', arith),
+                                  ('ZEKRA_PROVING_KEY', pk),
+                                  ('ZEKRA_CIRCUIT_METADATA', meta)) if not v]
+        if missing:
+            raise ZekraProofError(f'real prover is not configured: {", ".join(missing)} '
+                                  f'not set')
 
     circuit = reference.get('circuit') or {}
     params = {k: circuit.get(k) for k in CIRCUIT_PARAM_KEYS}
