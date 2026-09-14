@@ -578,6 +578,7 @@ class Blockchain:
 
         for block in new_blocks:
             for transaction in block['transactions']:
+                print(f"[ZEKRA-DEBUG] tx_type={transaction.get('transaction_type')!r} recipient={transaction.get('recipient')!r} me={node_identifier!r} match={transaction.get('recipient')==node_identifier}")
                 if transaction['transaction_type'] == 'request' and transaction['recipient'] == node_identifier:
                     function_name = transaction.get('function_name')
                     function_parameter = transaction.get('function_parameter')
