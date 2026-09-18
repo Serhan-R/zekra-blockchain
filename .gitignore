@@ -1,0 +1,7 @@
+node_*.pem
+node_*.log
+__pycache__/
+*.pyc
+zekra_env.sh
+config.txt
+ip_port_list.txt

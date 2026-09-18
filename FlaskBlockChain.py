@@ -242,6 +242,7 @@ class Blockchain:
                 request_transaction,
                 reference_envelope,
                 prover_pubkey=self.node_pubkeys.get(response_transaction.get('sender')),
+                node=node_identifier,
             )
             print(f"ZEKRA [{program_id}]: {verification_response or 'ABSTAIN'} -- {detail}")
 
@@ -669,7 +670,8 @@ class Blockchain:
             return None
 
         try:
-            attestation = generate_attestation(program_id, request_hash, nonce, reference)
+            attestation = generate_attestation(program_id, request_hash, nonce, reference,
+                                                node=node_identifier)
         except ZekraProofError as e:
             print(f"ZEKRA: cannot answer {request_hash}: {e}")
             return None
@@ -835,13 +837,27 @@ def mine():
     if not blockchain.transaction_pool:
         return jsonify({'message': 'No pending transactions to mine'}), 200
 
+    _pool_snapshot = list(blockchain.transaction_pool)
+
     # We run the proof of work algorithm to get the next proof...
     last_block = blockchain.last_block
+    _timing_t0 = time.time()
     proof = blockchain.proof_of_work(last_block)
+    _mining_ms = (time.time() - _timing_t0) * 1000
 
     # Forge the new Block by adding it to the chain
     previous_hash = blockchain.hash(last_block)
     block = blockchain.new_block(proof, previous_hash)
+
+    for _tx in _pool_snapshot:
+        if _tx.get('transaction_type') in ('request', 'response', 'verification'):
+            zekra_integration.log_timing_event(
+                'mining', program_id=_tx.get('program_id'),
+                request_hash=(_tx.get('hash')
+                              if _tx.get('transaction_type') == 'request'
+                              else _tx.get('parent')),
+                duration_ms=_mining_ms, node=node_identifier,
+                block_index=block['index'], mined_tx_type=_tx.get('transaction_type'))
 
     # After mining the block, check and execute any requests directed to this node
     blockchain.check_and_execute_requests()
@@ -886,6 +902,14 @@ def new_transaction():
         prover_sig=values.get('prover_sig'),
         reference_envelope=values.get('reference_envelope'),
     )
+
+    if (values.get('transaction_type') == 'request'
+            and values.get('function_name') == ZEKRA_FUNCTION_NAME
+            and blockchain.transaction_pool):
+        _new_tx = blockchain.transaction_pool[-1]
+        zekra_integration.log_timing_event(
+            'request_initiated', program_id=values.get('program_id'),
+            request_hash=_new_tx.get('hash'), duration_ms=0, node=node_identifier)
 
     response = {'message': f'Transaction will be added to Block {index}'}
     return jsonify(response), 201

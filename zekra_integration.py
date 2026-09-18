@@ -105,6 +105,7 @@ import secrets
 import subprocess
 import sys
 import tempfile
+import time
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
@@ -441,7 +442,32 @@ def available_programs():
 # Proof generation (mock / real)
 # ---------------------------------------------------------------------------
 
-def generate_attestation(program_id, request_hash, nonce, reference):
+def log_timing_event(stage, program_id=None, request_hash=None, duration_ms=None,
+                      node=None, **extra):
+    """
+    Append one structured timing record for the attestation-latency breakdown
+    (mining / proof_generation / verification / request_initiated), one JSON
+    line per event, correlated by request_hash. Best-effort: a logging
+    failure must never break an attestation, so this never raises.
+    """
+    path = _env('ZEKRA_TIMING_LOG') or os.path.expanduser('~/zekra_timing.jsonl')
+    record = {
+        'ts': time.time(),
+        'node': node,
+        'stage': stage,
+        'program_id': program_id,
+        'request_hash': request_hash,
+        'duration_ms': duration_ms,
+    }
+    record.update(extra)
+    try:
+        with open(path, 'a') as f:
+            f.write(json.dumps(record) + '\n')
+    except OSError:
+        pass
+
+
+def generate_attestation(program_id, request_hash, nonce, reference, node=None):
     """
     Produce an attestation for a challenge.
 
@@ -454,10 +480,14 @@ def generate_attestation(program_id, request_hash, nonce, reference):
             f'no program materials for {program_id!r} on this node -- it is not a '
             f'designated prover for that program')
 
+    _timing_t0 = time.time()
     if verifier_mode() == 'mock':
         h2, proof = _prove_mock(program_id, nonce, materials)
     else:
         h2, proof = _prove_real(program_id, nonce, materials, reference)
+    log_timing_event('proof_generation', program_id=program_id,
+                      request_hash=request_hash, node=node,
+                      duration_ms=(time.time() - _timing_t0) * 1000)
 
     key = node_private_key()
     return {
@@ -791,7 +821,7 @@ def _program_blinding(materials):
 # Verification -- checks (1), (2), (3)
 # ---------------------------------------------------------------------------
 
-def verify_attestation(response, request, reference_envelope, prover_pubkey=None):
+def verify_attestation(response, request, reference_envelope, prover_pubkey=None, node=None):
     """
     Run all three ZEKRA checks against a response transaction.
 
@@ -888,7 +918,12 @@ def verify_attestation(response, request, reference_envelope, prover_pubkey=None
 
     # --- CHECK (3): the SNARK ------------------------------------------------
     try:
+        _timing_t0 = time.time()
         ok = _verify_proof(x, proof, program_id, nonce, h2, reference)
+        log_timing_event('verification', program_id=program_id,
+                          request_hash=request.get('hash'), node=node,
+                          duration_ms=(time.time() - _timing_t0) * 1000,
+                          verdict=('correct' if ok else 'incorrect'))
     except ZekraVerificationError as e:
         return None, f'verifier could not run ({e}) -- abstaining'
 
