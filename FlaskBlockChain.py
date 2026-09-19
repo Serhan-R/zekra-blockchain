@@ -407,12 +407,19 @@ class Blockchain:
             coordinator_node_url = f'http://{request_node_address}/transactions/new'
 
             print("Verification Transaction Before Sending:", verification_transaction)
+            _net_t0 = time.time()
             try:
                 response = requests.post(
                     coordinator_node_url,
                     json=verification_transaction,
                     headers={"Content-Type": "application/json"}
                 )
+                zekra_integration.log_timing_event(
+                    'verification_delivery_post',
+                    program_id=response_transaction.get('program_id'),
+                    request_hash=parent_hash,
+                    duration_ms=(time.time() - _net_t0) * 1000,
+                    node=node_identifier, http_status=response.status_code)
                 if response.status_code == 201:
                     print(
                         f"Verification transaction sent to node {request_node_id}: {response.json()}")
@@ -723,12 +730,19 @@ class Blockchain:
 
                         print("Response Transaction Before Sending:",
                               self.summarize_transaction(response_transaction))
+                        _net_t0 = time.time()
                         try:
                             response = requests.post(
                                 recipient_node_url,
                                 json=response_transaction,
                                 headers={"Content-Type": "application/json"}
                             )
+                            zekra_integration.log_timing_event(
+                                'response_delivery_post',
+                                program_id=response_transaction.get('program_id'),
+                                request_hash=response_transaction.get('parent'),
+                                duration_ms=(time.time() - _net_t0) * 1000,
+                                node=node_identifier, http_status=response.status_code)
                             if response.status_code == 201:
                                 print(
                                     f"Response transaction sent to node {recipient_node_identifier}: {response.json()}")
@@ -1007,6 +1021,22 @@ def new_transaction():
             'request_initiated', program_id=values.get('program_id'),
             request_hash=_new_tx.get('hash'), duration_ms=0, node=node_identifier)
 
+    # Ground-truth network-arrival timestamps for response/verification
+    # transactions -- logged the instant the HTTP POST lands here, so unlike
+    # the driver's own polling loop this has zero detection lag. duration_ms
+    # is 0 (a timestamp marker, same convention as request_initiated above);
+    # the actual delivery latency is the gap between this and the sender's
+    # own *_delivery_post event, or between this and the round's earlier
+    # stage timestamps.
+    if values.get('transaction_type') == 'response':
+        zekra_integration.log_timing_event(
+            'response_received', program_id=values.get('program_id'),
+            request_hash=values.get('parent'), duration_ms=0, node=node_identifier)
+    elif values.get('transaction_type') == 'verification':
+        zekra_integration.log_timing_event(
+            'verification_received', program_id=values.get('program_id'),
+            request_hash=values.get('parent'), duration_ms=0, node=node_identifier)
+
     response = {'message': f'Transaction will be added to Block {index}'}
     return jsonify(response), 201
 
@@ -1174,6 +1204,25 @@ def count_verdicts():
         "message": verdict_message,
         "time_taken_seconds": final_time
     }
+
+    # Correlate this call to its round for the JSONL timing log. A
+    # verification transaction carries no program_id/request_hash of its own
+    # (see FlaskBlockChain.py's validate_response_transaction -- it's built
+    # from parent_hash alone), so pull them from the original request
+    # transaction via chain_hash_index (O(1), same cache the rest of the
+    # optimization uses) rather than re-scanning anything.
+    _first_verification = next(
+        (t for t in verification_block['transactions'] if t['transaction_type'] == 'verification'),
+        None)
+    _request_hash = _first_verification.get('parent') if _first_verification else None
+    _request_tx = blockchain.chain_hash_index.get(_request_hash) if _request_hash else None
+    zekra_integration.log_timing_event(
+        'count_verdicts',
+        program_id=(_request_tx or {}).get('program_id'),
+        request_hash=_request_hash,
+        duration_ms=elapsed_time * 1000,
+        node=node_identifier,
+        correct=correct_count, incorrect=incorrect_count)
 
     return jsonify(response), 200
 

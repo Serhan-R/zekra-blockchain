@@ -484,7 +484,8 @@ def generate_attestation(program_id, request_hash, nonce, reference, node=None):
     if verifier_mode() == 'mock':
         h2, proof = _prove_mock(program_id, nonce, materials)
     else:
-        h2, proof = _prove_real(program_id, nonce, materials, reference)
+        h2, proof = _prove_real(program_id, nonce, materials, reference,
+                                 request_hash=request_hash, node=node)
     log_timing_event('proof_generation', program_id=program_id,
                       request_hash=request_hash, node=node,
                       duration_ms=(time.time() - _timing_t0) * 1000)
@@ -567,7 +568,7 @@ def _run(cmd, cwd=None, timeout=None, what='command'):
     return r.stdout
 
 
-def _prove_real(program_id, nonce, materials, reference):
+def _prove_real(program_id, nonce, materials, reference, request_hash=None, node=None):
     """
     Generate a genuine ZEKRA attestation with the real toolchain.
 
@@ -595,6 +596,10 @@ def _prove_real(program_id, nonce, materials, reference):
     the program materials. r2 (path blinding) is sampled fresh per attestation --
     reusing it would make h2 a stable identifier for "this path ran", leaking
     across attestations.
+
+    request_hash/node are passed through only for the per-stage timing events
+    below (proof_gen_format / proof_gen_witness / proof_gen_prove) -- they play
+    no role in proof generation itself.
     """
     formatter = _env('ZEKRA_FORMATTER')
     prover = _env('ZEKRA_PROVER_BIN')
@@ -710,6 +715,7 @@ def _prove_real(program_id, nonce, materials, reference):
         if stale.startswith('in_'):
             os.remove(os.path.join(in_dir, stale))
 
+    _stage_t0 = time.time()
     _run([sys.executable, formatter, '-a', materials]
          + (['--pruned'] if circuit.get('pruned') else []) +
          ['--pad-adjlist-to', str(params['adjlist_len']),
@@ -724,6 +730,9 @@ def _prove_real(program_id, nonce, materials, reference):
           '--nonce-translator', str(r3),
           '--output-dir', in_dir],
          what='circuit_input_formatter.py')
+    log_timing_event('proof_gen_format', program_id=program_id,
+                      request_hash=request_hash, node=node,
+                      duration_ms=(time.time() - _stage_t0) * 1000)
 
     digest_path = os.path.join(in_dir, 'in_recorded_path_digest')
     if not os.path.isfile(digest_path):
@@ -767,8 +776,12 @@ def _prove_real(program_id, nonce, materials, reference):
     if os.path.isfile(witness):
         os.remove(witness)
 
+    _stage_t0 = time.time()
     _run(['java', '-Xmx4g', '-cp', java_cp, java_class],
          cwd=java_home or None, what='xjsnark witness generation')
+    log_timing_event('proof_gen_witness', program_id=program_id,
+                      request_hash=request_hash, node=node,
+                      duration_ms=(time.time() - _stage_t0) * 1000)
 
     if not os.path.isfile(witness):
         raise ZekraProofError(
@@ -781,7 +794,11 @@ def _prove_real(program_id, nonce, materials, reference):
 
     # ---- 3. prove ----------------------------------------------------------
     with tempfile.TemporaryDirectory() as tmp:
+        _stage_t0 = time.time()
         _run([prover, arith, pk, meta, witness, tmp], what='run_prover_raw')
+        log_timing_event('proof_gen_prove', program_id=program_id,
+                          request_hash=request_hash, node=node,
+                          duration_ms=(time.time() - _stage_t0) * 1000)
         proof_path = os.path.join(tmp, 'proof.bin')
         if not os.path.isfile(proof_path):
             raise ZekraProofError(f'run_prover_raw produced no proof in {tmp}')
