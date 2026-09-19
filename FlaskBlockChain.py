@@ -74,8 +74,30 @@ class Blockchain:
         self.chain_all_reference_program_ids = set()
         self.last_verification_block_index = None  # for count_verdicts()
 
+        # Scratch-space correlation key for the consensus/broadcast events
+        # triggered by new_block()/new_transaction() (notify_neighbors_cascade,
+        # notify_pool_update, resolve_conflicts on whichever peer's
+        # /notify_change this reaches). Read via getattr(..., None) with a
+        # safe fallback everywhere it's used, so nothing breaks if it's ever
+        # left unset. A plain instance attribute is safe here specifically
+        # because this node's own Flask server is single-threaded (see
+        # notify_neighbors()'s docstring) -- this would need threading.local()
+        # instead if that ever changes.
+        self._pending_request_hashes = None
+
         # Create the genesis block
         self.new_block(previous_hash='1', proof=100)
+
+    def _request_hash_for(self, tx):
+        """
+        The correlation key used to attribute a mesh-wide event (mining,
+        notify_neighbors_cascade, notify_pool_update, broadcast_mined_txs,
+        resolve_conflicts, ...) back to the round it belongs to. Same rule
+        /mine's per-transaction 'mining' logging already uses: a request
+        transaction is keyed by its own hash, everything else (response /
+        verification) by the request hash it carries as 'parent'.
+        """
+        return tx.get('hash') if tx.get('transaction_type') == 'request' else tx.get('parent')
 
     def _index_transaction(self, tx, block_index):
         """
@@ -379,14 +401,25 @@ class Blockchain:
             self._rebuild_indices()
             replaced = True
 
-        zekra_integration.log_timing_event(
-            'resolve_conflicts', node=node_identifier,
-            duration_ms=(time.time() - _rc_t0) * 1000,
-            chain_length=len(self.chain), replaced=replaced,
-            neighbor_count=len(neighbours), per_neighbor_fetch_ms=_per_neighbor_ms,
-            per_neighbor_full_fetch=_per_neighbor_full_fetch,
-            fast_path_validations=_fast_path_validations,
-            full_validations=_full_validations)
+        # Correlation: reads self._pending_request_hashes (set by the caller --
+        # /notify_change, when the notifying peer sent 'request_hashes' --
+        # right before calling resolve_conflicts(), cleared right after) rather
+        # than taking a parameter. Falls back to today's uncorrelated single
+        # log entry (request_hash=None) whenever that isn't set -- e.g.
+        # /nodes/resolve, the manual admin endpoint, which the timed round
+        # protocol never calls and has no round to attribute this to anyway.
+        _rc_ms = (time.time() - _rc_t0) * 1000
+        _request_hashes = getattr(self, '_pending_request_hashes', None) or []
+        for _rh in _request_hashes:
+            zekra_integration.log_timing_event(
+                'resolve_conflicts', node=node_identifier,
+                request_hash=_rh,
+                duration_ms=_rc_ms,
+                chain_length=len(self.chain), replaced=replaced,
+                neighbor_count=len(neighbours), per_neighbor_fetch_ms=_per_neighbor_ms,
+                per_neighbor_full_fetch=_per_neighbor_full_fetch,
+                fast_path_validations=_fast_path_validations,
+                full_validations=_full_validations)
 
         return replaced
 
@@ -596,29 +629,54 @@ class Blockchain:
         propagation, none of which showed up in any previously-logged stage.
         Logged here as 'notify_neighbors_cascade', with a per-neighbour
         breakdown, so it can be correlated against total_latency_ms.
+
+        Correlation: reads self._pending_request_hashes (set by the caller
+        right before this call, cleared right after -- see new_block()'s and
+        new_transaction()'s comments) instead of taking a parameter, so this
+        is not a signature change. Logs once per hash so a block that swept
+        several rounds' transactions together correctly attributes this same
+        cascade cost to each of them, exactly like the existing 'mining'
+        stage already does in /mine. Also forwarded to every notified peer as
+        'request_hashes' in the POST body, so THEIR resulting
+        resolve_conflicts() can attribute its own cost the same way.
         """
         last_block_hash = self.hash(self.last_block)
+        _request_hashes = getattr(self, '_pending_request_hashes', None) or []
         _cascade_t0 = time.time()
         _per_neighbor_ms = {}
         for node in self.nodes:
             _n_t0 = time.time()
             try:
-                response = requests.post(f'http://{node}/notify_change', json={'last_block_hash': last_block_hash})
+                response = requests.post(
+                    f'http://{node}/notify_change',
+                    json={'last_block_hash': last_block_hash, 'request_hashes': _request_hashes})
                 if response.status_code == 200:
                     print(f"Notified node {node}, response: {response.json()}")
             except requests.exceptions.RequestException:
                 print(f"Failed to notify node {node}")
             _per_neighbor_ms[node] = round((time.time() - _n_t0) * 1000, 1)
-        zekra_integration.log_timing_event(
-            'notify_neighbors_cascade', node=node_identifier,
-            duration_ms=(time.time() - _cascade_t0) * 1000,
-            last_block_hash=last_block_hash, neighbor_count=len(self.nodes),
-            per_neighbor_ms=_per_neighbor_ms)
+        _cascade_ms = (time.time() - _cascade_t0) * 1000
+        for _rh in _request_hashes:
+            zekra_integration.log_timing_event(
+                'notify_neighbors_cascade', node=node_identifier,
+                request_hash=_rh,
+                duration_ms=_cascade_ms,
+                last_block_hash=last_block_hash, neighbor_count=len(self.nodes),
+                per_neighbor_ms=_per_neighbor_ms)
 
     def notify_transaction_pool_update(self):
         """
         Notify all neighbors that the transaction pool has been updated.
+
+        Previously untimed entirely -- like notify_neighbors(), this is a
+        sequential, blocking loop over every peer, so its cost was silently
+        part of the same 'Unaccounted' gap. Logged as 'notify_pool_update',
+        correlated via self._pending_request_hashes the same way
+        notify_neighbors() is (see new_block()'s and new_transaction()'s
+        comments for the two places that set it before calling this).
         """
+        _request_hashes = getattr(self, '_pending_request_hashes', None) or []
+        _t0 = time.time()
         for node in self.nodes:
             try:
                 response = requests.post(f'http://{node}/update_transaction_pool',
@@ -627,6 +685,12 @@ class Blockchain:
                     print(f"Notified node {node} of transaction pool update.")
             except requests.exceptions.RequestException:
                 print(f"Failed to notify node {node} of transaction pool update.")
+        _ms = (time.time() - _t0) * 1000
+        for _rh in _request_hashes:
+            zekra_integration.log_timing_event(
+                'notify_pool_update', node=node_identifier,
+                request_hash=_rh, duration_ms=_ms,
+                neighbor_count=len(self.nodes))
 
     def new_block(self, proof, previous_hash):
         """
@@ -672,8 +736,22 @@ class Blockchain:
         # Clear the transaction pool since all transactions were added to the block
         self.transaction_pool = []
 
-        self.notify_neighbors()
-        self.notify_transaction_pool_update()
+        # Scratch-space correlation key for notify_neighbors_cascade (this
+        # process) and notify_pool_update, and -- forwarded across the
+        # network by notify_neighbors() -- resolve_conflicts() on whichever
+        # peer's /notify_change handler this cascade reaches. Read by those
+        # methods instead of being passed as a parameter, so this is the
+        # ONLY place their calling convention changes; the methods
+        # themselves keep their existing signatures. Safe as a plain
+        # instance attribute because this node's own Flask server is
+        # single-threaded (see notify_neighbors()'s docstring) -- would need
+        # threading.local() instead if that ever changes.
+        self._pending_request_hashes = [self._request_hash_for(tx) for tx in transactions_to_add] or []
+        try:
+            self.notify_neighbors()
+            self.notify_transaction_pool_update()
+        finally:
+            self._pending_request_hashes = None
 
         self.broadcast_mined_transactions(transactions_to_add)
         return block
@@ -681,7 +759,15 @@ class Blockchain:
     def broadcast_mined_transactions(self, mined_transactions):
         """
         Broadcast the list of mined transactions to all nodes.
+
+        Previously untimed entirely, same as notify_transaction_pool_update().
+        Logged as 'broadcast_mined_txs', correlated per transaction using the
+        parameter this method already receives -- no scratch-space attribute
+        needed here, unlike notify_neighbors()/notify_transaction_pool_update(),
+        since the caller already hands this method exactly the transactions
+        it needs to key off of.
         """
+        _t0 = time.time()
         for node in self.nodes:
             try:
                 response = requests.post(
@@ -695,6 +781,13 @@ class Blockchain:
                     print(f"Failed to remove mined transactions from node {node}: {response.status_code}")
             except requests.exceptions.RequestException as e:
                 print(f"Error removing mined transactions from node {node}: {e}")
+        _ms = (time.time() - _t0) * 1000
+        _request_hashes = [self._request_hash_for(tx) for tx in mined_transactions] or []
+        for _rh in _request_hashes:
+            zekra_integration.log_timing_event(
+                'broadcast_mined_txs', node=node_identifier,
+                request_hash=_rh, duration_ms=_ms,
+                neighbor_count=len(self.nodes))
 
     def new_transaction(self, sender, recipient, transaction_type="standard", function_name=None,
                         function_parameter=None, parent=None, program_id=None,
@@ -819,7 +912,16 @@ class Blockchain:
                 return self.last_block['index'] + 1
 
         self.transaction_pool.append(transaction)
-        self.notify_transaction_pool_update()
+        # Same scratch-space correlation pattern as new_block() (see its
+        # comment) -- this is the OTHER call site of
+        # notify_transaction_pool_update(), reached once per submitted
+        # transaction rather than once per mined block, so it needs its own
+        # request-hash context set here.
+        self._pending_request_hashes = [self._request_hash_for(transaction)]
+        try:
+            self.notify_transaction_pool_update()
+        finally:
+            self._pending_request_hashes = None
         return self.last_block['index'] + 1
 
     def check_and_execute_requests(self):
@@ -1263,8 +1365,17 @@ def notify_change():
 
     # Check if the local chain is already synchronized
     if last_block_hash != local_last_block_hash:
-        # If hashes differ, synchronize the chain by fetching from the notifying node
-        replaced = blockchain.resolve_conflicts()
+        # If hashes differ, synchronize the chain by fetching from the notifying node.
+        # 'request_hashes' is optional -- a peer running older code simply
+        # won't send it, values.get() returns None, and resolve_conflicts()
+        # falls back to logging uncorrelated exactly like it does today. See
+        # new_block()'s comment for why this is a scratch attribute rather
+        # than a parameter to resolve_conflicts() itself.
+        blockchain._pending_request_hashes = values.get('request_hashes')
+        try:
+            replaced = blockchain.resolve_conflicts()
+        finally:
+            blockchain._pending_request_hashes = None
         if replaced:
             # After updating the chain, check and execute requests in the new blocks
             blockchain.check_and_execute_requests()
