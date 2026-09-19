@@ -93,7 +93,8 @@ CSV_FIELDNAMES = [
     "app", "sender_ip", "sender_port", "sender_hash",
     "recipient_ip", "recipient_port", "recipient_hash",
     "request_hash", "complete",
-    "driver_t0", "driver_response_wait_s", "driver_verify_wait_s", "driver_total_wall_s",
+    "driver_t0", "driver_response_wait_s", "driver_verify_wait_s",
+    "driver_verify_settle_margin_s", "driver_total_wall_s",
     "n_verifications",
     "count_verdicts_message", "count_verdicts_correct", "count_verdicts_incorrect",
     "count_verdicts_server_ms", "count_verdicts_driver_wall_s", "count_verdicts_error",
@@ -238,7 +239,16 @@ def parse_verdict_counts(message):
     return None, None
 
 
-def wait_for_response(sender, request_hash, timeout_s, poll_s=1.0):
+def wait_for_response(sender, request_hash, timeout_s, poll_s=0.25):
+    """poll_s defaults tighter than you might expect (0.25s, not 1s):
+    whatever we observe here is stamped as t_response and feeds directly into
+    driver_response_wait_s, so every second of poll_s is up to a second of
+    pure polling lag riding along in that number. There's no fixed dead-time
+    to strip out here the way there is in wait_for_verifications_to_settle
+    (see its docstring) -- this is just detection jitter, and tightening the
+    poll interval is the only lever for it. For a bias-free number, prefer
+    the JSONL-derived response_received timestamp (logged the instant the
+    HTTP POST lands, zero polling involved) via zekra_timing_report.py."""
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         pool = pool_of(sender)
@@ -249,9 +259,19 @@ def wait_for_response(sender, request_hash, timeout_s, poll_s=1.0):
     return False
 
 
-def wait_for_verifications_to_settle(sender, request_hash, max_wait_s, quiet_s=3.0, poll_s=1.0):
+def wait_for_verifications_to_settle(sender, request_hash, max_wait_s, quiet_s=3.0, poll_s=0.25):
     """Poll until the number of pending verification tx for this round stops
-    growing for `quiet_s` seconds, or max_wait_s elapses -- whichever first."""
+    growing for `quiet_s` seconds, or max_wait_s elapses -- whichever first.
+
+    Returns (count, last_change) rather than just count. We deliberately keep
+    polling for a full quiet_s of silence before returning -- that's an
+    operational safety margin, needed so a late-arriving vote isn't missed --
+    but that margin is NOT part of how long verification actually took, so it
+    must not leak into the reported timing. last_change is the timestamp of
+    the last observed count increase, i.e. the moment verification actually
+    settled; callers should measure elapsed time against last_change, not
+    against when this function returns (which is last_change + quiet_s, plus
+    whatever polling lag). See run_round()'s driver_verify_wait_s."""
     deadline = time.time() + max_wait_s
     last_count = -1
     last_change = time.time()
@@ -263,9 +283,9 @@ def wait_for_verifications_to_settle(sender, request_hash, max_wait_s, quiet_s=3
             last_count = count
             last_change = time.time()
         if count > 0 and (time.time() - last_change) >= quiet_s:
-            return count
+            return count, last_change
         time.sleep(poll_s)
-    return last_count
+    return last_count, last_change
 
 
 def run_round(app, sender, recipient, response_timeout, verify_timeout, count_verdicts_timeout, dry_run):
@@ -286,13 +306,25 @@ def run_round(app, sender, recipient, response_timeout, verify_timeout, count_ve
 
     t_response = time.time()
     mine(sender, "sender")
-    n_verified = wait_for_verifications_to_settle(sender, request_hash, verify_timeout)
-    t_verified = time.time()
+    n_verified, t_verified = wait_for_verifications_to_settle(sender, request_hash, verify_timeout)
+    t_verify_loop_end = time.time()
     mine(sender, "sender (final)")
     t_final = time.time()
 
+    # t_verified is when the vote count actually last changed -- the real
+    # settle instant. wait_for_verifications_to_settle() waits an ADDITIONAL
+    # quiet_s (default 3s) of silence after that before returning, purely as
+    # an operational safety margin against a late vote, plus whatever polling
+    # lag it picked up along the way -- neither of those is verification
+    # work, so driver_verify_wait_s below is measured against t_verified, not
+    # against when that call returned. The discarded margin is reported
+    # separately (driver_verify_settle_margin_s) so it's visible rather than
+    # silently dropped.
+    settle_margin_s = t_verify_loop_end - t_verified
+
     print(f"    done: response +{t_response-t0:.1f}s, "
-          f"{n_verified} verification(s) +{t_verified-t_response:.1f}s, "
+          f"{n_verified} verification(s) +{t_verified-t_response:.1f}s "
+          f"(settle margin {settle_margin_s:.1f}s discarded), "
           f"total driver-observed wall time {t_final-t0:.1f}s")
 
     # count_verdicts on the sender -- it already has the just-sealed final
@@ -327,6 +359,7 @@ def run_round(app, sender, recipient, response_timeout, verify_timeout, count_ve
         "driver_t0": t0,
         "driver_response_wait_s": round(t_response - t0, 3),
         "driver_verify_wait_s": round(t_verified - t_response, 3),
+        "driver_verify_settle_margin_s": round(settle_margin_s, 3),
         "driver_total_wall_s": round(t_final - t0, 3),
         "n_verifications": n_verified,
         "count_verdicts_message": cv_message,
