@@ -99,6 +99,29 @@ class Blockchain:
         """
         return tx.get('hash') if tx.get('transaction_type') == 'request' else tx.get('parent')
 
+    @staticmethod
+    def _dedup_request_hashes(hashes):
+        """
+        Collapse a correlation-key list to one entry per unique request_hash,
+        dropping any falsy (None/'') entry -- fixes the duplicate-logging bug
+        at its source: this list is built from every transaction in a
+        block/batch, and the final "verdict" block for a round seals EVERY
+        verifier's vote together, all sharing that round's request_hash, so
+        an undeduplicated list turns one physical event (one
+        resolve_conflicts/notify_neighbors_cascade/notify_pool_update/
+        broadcast_mined_txs call) into N identical log_timing_event() calls
+        -- N = however many votes were in that batch. This was previously
+        worked around report-side, in zekra_timing_report.py's
+        dedup_consensus_duplicates(); this is the real fix, at the one place
+        (new_block(), plus broadcast_mined_transactions()'s own separate
+        list) these lists are actually built. Order-preserving (first
+        occurrence wins) though nothing downstream depends on order.
+        Dropping falsy entries also delivers on the design intent already
+        documented elsewhere in this file: these stages are never logged
+        uncorrelated to a real round.
+        """
+        return list(dict.fromkeys(h for h in hashes if h))
+
     def _index_transaction(self, tx, block_index):
         """
         Fold one mined transaction into the incremental chain indices.
@@ -404,10 +427,11 @@ class Blockchain:
         # Correlation: reads self._pending_request_hashes (set by the caller --
         # /notify_change, when the notifying peer sent 'request_hashes' --
         # right before calling resolve_conflicts(), cleared right after) rather
-        # than taking a parameter. Falls back to today's uncorrelated single
-        # log entry (request_hash=None) whenever that isn't set -- e.g.
-        # /nodes/resolve, the manual admin endpoint, which the timed round
-        # protocol never calls and has no round to attribute this to anyway.
+        # than taking a parameter. Whenever that isn't set -- e.g. /nodes/resolve,
+        # the manual admin endpoint, which the timed round protocol never calls
+        # and has no round to attribute this to anyway -- the list below is
+        # empty and nothing gets logged at all (not a request_hash=None entry;
+        # these stages are never logged uncorrelated to a real round).
         _rc_ms = (time.time() - _rc_t0) * 1000
         _request_hashes = getattr(self, '_pending_request_hashes', None) or []
         for _rh in _request_hashes:
@@ -746,7 +770,8 @@ class Blockchain:
         # instance attribute because this node's own Flask server is
         # single-threaded (see notify_neighbors()'s docstring) -- would need
         # threading.local() instead if that ever changes.
-        self._pending_request_hashes = [self._request_hash_for(tx) for tx in transactions_to_add] or []
+        self._pending_request_hashes = self._dedup_request_hashes(
+            self._request_hash_for(tx) for tx in transactions_to_add)
         try:
             self.notify_neighbors()
             self.notify_transaction_pool_update()
@@ -782,7 +807,8 @@ class Blockchain:
             except requests.exceptions.RequestException as e:
                 print(f"Error removing mined transactions from node {node}: {e}")
         _ms = (time.time() - _t0) * 1000
-        _request_hashes = [self._request_hash_for(tx) for tx in mined_transactions] or []
+        _request_hashes = self._dedup_request_hashes(
+            self._request_hash_for(tx) for tx in mined_transactions)
         for _rh in _request_hashes:
             zekra_integration.log_timing_event(
                 'broadcast_mined_txs', node=node_identifier,
@@ -917,7 +943,7 @@ class Blockchain:
         # notify_transaction_pool_update(), reached once per submitted
         # transaction rather than once per mined block, so it needs its own
         # request-hash context set here.
-        self._pending_request_hashes = [self._request_hash_for(transaction)]
+        self._pending_request_hashes = self._dedup_request_hashes([self._request_hash_for(transaction)])
         try:
             self.notify_transaction_pool_update()
         finally:
@@ -1368,10 +1394,16 @@ def notify_change():
         # If hashes differ, synchronize the chain by fetching from the notifying node.
         # 'request_hashes' is optional -- a peer running older code simply
         # won't send it, values.get() returns None, and resolve_conflicts()
-        # falls back to logging uncorrelated exactly like it does today. See
-        # new_block()'s comment for why this is a scratch attribute rather
-        # than a parameter to resolve_conflicts() itself.
-        blockchain._pending_request_hashes = values.get('request_hashes')
+        # logs nothing at all for this call (not a request_hash=None entry --
+        # see resolve_conflicts()'s own comment). _dedup_request_hashes()
+        # itself tolerates a None/whatever-was-sent value since it filters
+        # falsy entries; a peer that already deduplicates (this fix) sends a
+        # clean list, but this also protects against an older, undeduplicated
+        # peer on the wire. See new_block()'s comment for why this is a
+        # scratch attribute rather than a parameter to resolve_conflicts()
+        # itself.
+        blockchain._pending_request_hashes = blockchain._dedup_request_hashes(
+            values.get('request_hashes') or [])
         try:
             replaced = blockchain.resolve_conflicts()
         finally:
