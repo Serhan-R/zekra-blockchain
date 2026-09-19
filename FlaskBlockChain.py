@@ -181,23 +181,57 @@ class Blockchain:
 
     def valid_chain(self, chain):
         """
-        Determine if a given blockchain is valid
+        Determine if a given blockchain is valid, from genesis.
 
         :param chain: A blockchain
         :return: True if valid, False if not
         """
+        if not chain:
+            return True
+        return self._valid_suffix(chain, 0)
 
-        # NOTE: this function used to print every block of every candidate chain
-        # it validated. Those debug prints were removed (issues doc #5): they
-        # served no purpose, and writing that much output to a pipe with no
-        # reader raised an unhandled BrokenPipeError that propagated up through
-        # resolve_conflicts() and killed the sync mid-validation -- which is why
-        # a node could sit silently stuck several blocks behind for an entire
-        # session. With ZEKRA attestations on the chain they would also dump
-        # hundreds of base64 characters of proof payload per block.
+    def _valid_suffix(self, chain, from_index):
+        """
+        Same walk as valid_chain(), but starting at from_index instead of 0 --
+        i.e. it trusts chain[from_index] as already-validated and only checks
+        the linkage/proof-of-work from there to the end.
 
-        last_block = chain[0]
-        current_index = 1
+        Why this exists: resolve_conflicts() used to call valid_chain(chain)
+        on every candidate from scratch, re-deriving every previous_hash link
+        and re-running valid_proof() for the ENTIRE chain, every single time
+        any neighbour had one more block than us -- on a long mesh run that
+        is O(chain length) work repeated on every mine(). But self.chain is
+        always kept valid as an invariant (it's either the genesis block, or
+        it was only ever replaced by a candidate that already passed this
+        exact validation), so if a candidate's block at our own tip's index
+        has the same hash as our own tip, the ENTIRE prefix up to there is
+        guaranteed identical -- a block's hash recursively commits to its
+        previous_hash, which commits to the block before that, and so on
+        back to genesis, so one hash match is sound proof the whole shared
+        history matches (this relies on the exact same SHA-256 collision
+        resistance every proof-of-work check here already depends on, not a
+        new assumption). resolve_conflicts() uses that to call this with
+        from_index = len(self.chain) - 1 instead of calling valid_chain(),
+        turning the common "one neighbour mined one more block" case into
+        O(new blocks) instead of O(whole chain), while still falling back to
+        a full valid_chain() call whenever the tip hashes don't match (a
+        real fork, or no local chain yet) -- see resolve_conflicts() for the
+        fallback. The `length > max_length` comparison itself is untouched;
+        this only changes how cheaply a candidate that passes it gets
+        verified.
+
+        NOTE: this function used to print every block of every candidate
+        chain it validated. Those debug prints were removed (issues doc #5):
+        they served no purpose, and writing that much output to a pipe with
+        no reader raised an unhandled BrokenPipeError that propagated up
+        through resolve_conflicts() and killed the sync mid-validation --
+        which is why a node could sit silently stuck several blocks behind
+        for an entire session. With ZEKRA attestations on the chain they
+        would also dump hundreds of base64 characters of proof payload per
+        block.
+        """
+        last_block = chain[from_index]
+        current_index = from_index + 1
 
         while current_index < len(chain):
             block = chain[current_index]
@@ -221,43 +255,117 @@ class Blockchain:
 
         :return: True if our chain was replaced, False if not
 
-        Timing note: this fans out a GET /chain to every registered neighbour,
-        SEQUENTIALLY, and each of those calls can itself be slow (single-
-        threaded Flask on the peer, a growing chain payload to serialize/
-        transmit, or that peer being mid-resolve_conflicts() itself). None of
-        that was previously visible anywhere -- log_timing_event() only ever
-        recorded mining/proof_generation/verification. Total wall time here,
-        plus the per-neighbour fetch breakdown, is now logged as its own
-        'resolve_conflicts' stage so it can be correlated against
-        total_latency_ms instead of silently vanishing into it.
+        Timing note: this fans out to every registered neighbour, SEQUENTIALLY,
+        and each of those calls can itself be slow (single-threaded Flask on
+        the peer, a growing chain payload to serialize/transmit, or that peer
+        being mid-resolve_conflicts() itself). None of that was previously
+        visible anywhere -- log_timing_event() only ever recorded
+        mining/proof_generation/verification. Total wall time here, plus the
+        per-neighbour breakdown, is logged as its own 'resolve_conflicts'
+        stage so it can be correlated against total_latency_ms instead of
+        silently vanishing into it.
+
+        Two changes from the original version, both aimed at the same O(chain
+        length)-per-call cost, neither touching the `length > max_length`
+        rule itself (still a straight length comparison, not proof-of-work):
+
+        1. A neighbour is asked for a cheap /chain/tip (just {length,
+           tip_hash}) first. The full chain body -- which only grows over a
+           long mesh run -- is only fetched from neighbours that actually
+           claim to be longer, instead of being transmitted and JSON-decoded
+           on every single resolve_conflicts() call regardless of whether it
+           was ever going to be used. This is the same idea as Bitcoin
+           exchanging small headers before deciding whether to pull a full
+           block body.
+        2. A candidate chain that IS longer is checked against our own tip's
+           hash first. If it matches (see _valid_suffix()'s docstring for why
+           a single hash match certifies the whole shared prefix), only the
+           new tail blocks get walked through valid_proof() -- not the whole
+           candidate from genesis. A real fork (tip hash doesn't match) still
+           falls back to the original full valid_chain() from-genesis check,
+           so correctness for the rare divergent case is unchanged.
+
+        Sequential-per-neighbour and single-threaded Flask are NOT changed
+        here -- that's a separate, larger concurrency change with its own
+        risk (shared self.chain/self.nodes state), not something to fold
+        into a validation-cost fix silently.
         """
         _rc_t0 = time.time()
         neighbours = self.nodes
         new_chain = None
 
-        # We're only looking for chains longer than ours
+        # We're only looking for chains longer than ours -- same rule as
+        # before, just checked against a small /chain/tip body first.
         max_length = len(self.chain)
+        our_tip_hash = self.hash(self.chain[-1]) if self.chain else None
+
         _per_neighbor_ms = {}
+        _per_neighbor_full_fetch = {}
+        _fast_path_validations = 0
+        _full_validations = 0
 
         # Grab and verify the chains from all the nodes in our network
         for node in neighbours:
             _n_t0 = time.time()
+            _per_neighbor_full_fetch[node] = False
+            try:
+                tip_response = requests.get(f'http://{node}/chain/tip')
+            except requests.exceptions.RequestException:
+                print(f"Failed to reach {node} for /chain/tip")
+                _per_neighbor_ms[node] = round((time.time() - _n_t0) * 1000, 1)
+                continue
+
+            if tip_response.status_code != 200:
+                _per_neighbor_ms[node] = round((time.time() - _n_t0) * 1000, 1)
+                continue
+
+            tip_info = tip_response.json()
+            neighbor_length = tip_info.get('length', 0)
+            neighbor_tip_hash = tip_info.get('tip_hash')
+
+            # Cheap check first, exactly the same comparison as before --
+            # skip the full-body fetch entirely if they're not longer.
+            if neighbor_length <= max_length:
+                _per_neighbor_ms[node] = round((time.time() - _n_t0) * 1000, 1)
+                continue
+
+            _per_neighbor_full_fetch[node] = True
             response = requests.get(f'http://{node}/chain')
             _per_neighbor_ms[node] = round((time.time() - _n_t0) * 1000, 1)
 
-            if response.status_code == 200:
-                length = response.json()['length']
-                chain = response.json()['chain']
+            if response.status_code != 200:
+                continue
 
-                # Check if the length is longer and the chain is valid
-                if length > max_length and self.valid_chain(chain):
+            body = response.json()
+            length = body['length']
+            chain = body['chain']
 
-                    last_block = chain[-1]
-                    if self.validate_response_transaction(last_block):
-                        max_length = length
-                        new_chain = chain
-                    else:
-                        print(f"Rejected chain from {node} due to an invalid response transaction.")
+            # Re-check against the (possibly-updated-by-an-earlier-neighbour)
+            # running max_length, same as the original single-shot check.
+            if length <= max_length:
+                continue
+
+            if (our_tip_hash is not None
+                    and neighbor_tip_hash is not None
+                    and len(chain) > len(self.chain)
+                    and self.hash(chain[len(self.chain) - 1]) == our_tip_hash):
+                # Shared prefix confirmed identical to our own already-valid
+                # chain -- only validate the blocks this peer added.
+                candidate_ok = self._valid_suffix(chain, len(self.chain) - 1)
+                _fast_path_validations += 1
+            else:
+                # No local chain, or their chain diverges before our tip --
+                # a real fork. Fall back to full from-genesis validation.
+                candidate_ok = self.valid_chain(chain)
+                _full_validations += 1
+
+            if candidate_ok:
+                last_block = chain[-1]
+                if self.validate_response_transaction(last_block):
+                    max_length = length
+                    new_chain = chain
+                else:
+                    print(f"Rejected chain from {node} due to an invalid response transaction.")
 
         # Replace our chain if we discovered a new, valid chain longer than ours
         # Update the last_processed_block to the last processed blocked on the new chain
@@ -275,7 +383,10 @@ class Blockchain:
             'resolve_conflicts', node=node_identifier,
             duration_ms=(time.time() - _rc_t0) * 1000,
             chain_length=len(self.chain), replaced=replaced,
-            neighbor_count=len(neighbours), per_neighbor_fetch_ms=_per_neighbor_ms)
+            neighbor_count=len(neighbours), per_neighbor_fetch_ms=_per_neighbor_ms,
+            per_neighbor_full_fetch=_per_neighbor_full_fetch,
+            fast_path_validations=_fast_path_validations,
+            full_validations=_full_validations)
 
         return replaced
 
@@ -1270,6 +1381,23 @@ def full_chain():
     response = {
         'chain': blockchain.chain,
         'length': len(blockchain.chain),
+    }
+    return jsonify(response), 200
+
+
+@app.route('/chain/tip', methods=['GET'])
+def chain_tip():
+    """
+    Cheap sibling of /chain: just this node's chain length and tip hash, with
+    no chain body serialized. resolve_conflicts() hits this on every neighbour
+    first, and only falls through to a full /chain fetch for a neighbour that
+    actually claims to be longer -- so a stable mesh isn't re-transmitting
+    and re-decoding the entire (ever-growing) chain from every neighbour on
+    every single mine(), just to find out most of them aren't longer.
+    """
+    response = {
+        'length': len(blockchain.chain),
+        'tip_hash': blockchain.hash(blockchain.chain[-1]) if blockchain.chain else None,
     }
     return jsonify(response), 200
 
