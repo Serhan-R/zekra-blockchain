@@ -34,8 +34,116 @@ class Blockchain:
 
         self.last_processed_block = 0
 
+        # ---------------------------------------------------------------
+        # Incremental chain indices.
+        #
+        # new_transaction(), validate_response_transaction(),
+        # find_reference(), and the /update_transaction_pool,
+        # /zekra/status, /count_verdicts routes all used to answer their
+        # question by walking self.chain from the genesis block, every
+        # single call. On a long-running mesh that chain never resets, so
+        # every one of those became slower as the run went on -- this is
+        # what showed up as the growing "Network/other" residual.
+        #
+        # These attributes are pure caches: self.chain remains the source
+        # of truth, and _rebuild_indices() can always reconstruct every one
+        # of them from it. They are updated incrementally in exactly two
+        # places -- _index_block() at the end of new_block() (one new
+        # block, O(block size)) and _rebuild_indices() in resolve_conflicts()
+        # (the whole chain replaced by a peer's, O(new chain length), but
+        # only on an actual fork switch, not per transaction).
+        #
+        # IMPORTANT: anything that mutates self.chain directly instead of
+        # going through new_block()/resolve_conflicts() (this exists in at
+        # least one place -- test_zekra_unit.py's
+        # test_find_reference_first_wins builds blocks by hand and appends
+        # them straight onto bc.chain) MUST call self._rebuild_indices()
+        # afterward, or these caches silently go stale.
+        # ---------------------------------------------------------------
+        self.chain_tx_hashes = set()          # every tx hash ever mined
+        self.chain_hash_index = {}            # tx hash -> tx (for parent lookups)
+        self.chain_challenge_keys = set()     # (program_id, str(nonce)) already used
+        self.chain_response_parents = set()   # parent hashes already answered
+        self.chain_references = {}            # program_id -> first VALID reference envelope
+        # program_id -> True for every reference tx seen, valid or not -- kept
+        # separate from chain_references because /zekra/status's
+        # "references_on_chain" field has always reported anything with a
+        # reference_envelope, trustworthy or not (it's a "what's been pushed
+        # to my chain" diagnostic, not "what can I prove with"), and
+        # collapsing the two would quietly change that endpoint's output.
+        self.chain_all_reference_program_ids = set()
+        self.last_verification_block_index = None  # for count_verdicts()
+
         # Create the genesis block
         self.new_block(previous_hash='1', proof=100)
+
+    def _index_transaction(self, tx, block_index):
+        """
+        Fold one mined transaction into the incremental chain indices.
+        Called only from _index_block(). See the indices' declaration in
+        __init__ for why these exist.
+        """
+        h = tx.get('hash')
+        if h:
+            self.chain_tx_hashes.add(h)
+            self.chain_hash_index[h] = tx
+
+        tx_type = tx.get('transaction_type')
+        function_name = tx.get('function_name')
+
+        if tx_type == 'request' and function_name == ZEKRA_FUNCTION_NAME:
+            self.chain_challenge_keys.add(
+                (tx.get('program_id'), str(tx.get('function_parameter'))))
+
+        if tx_type == 'response' and function_name == ZEKRA_FUNCTION_NAME and tx.get('parent'):
+            self.chain_response_parents.add(tx.get('parent'))
+
+        if tx_type == REFERENCE_TX_TYPE and tx.get('reference_envelope'):
+            envelope = tx['reference_envelope']
+            # Mirrors find_reference()'s original contract exactly: verify
+            # once, and "first valid one wins" -- never overwrite an
+            # already-cached reference for this program_id. Blocks are
+            # always indexed in chain order (new_block() appends in order;
+            # _rebuild_indices() walks self.chain in order), so the first
+            # valid reference seen here is the same one the original
+            # scan-every-call implementation would have returned.
+            reference, why = verify_reference(envelope)
+            if reference is None:
+                print(f"Ignoring untrustworthy reference on chain: {why}")
+            else:
+                program_id = reference.get('program_id')
+                if program_id is not None and program_id not in self.chain_references:
+                    self.chain_references[program_id] = envelope
+            # Unconditional, regardless of validity -- see the attribute's
+            # own comment in __init__.
+            inner_ref = envelope.get('reference') if isinstance(envelope, dict) else None
+            if isinstance(inner_ref, dict) and inner_ref.get('program_id') is not None:
+                self.chain_all_reference_program_ids.add(inner_ref['program_id'])
+
+        if tx_type == 'verification':
+            self.last_verification_block_index = block_index
+
+    def _index_block(self, block):
+        for tx in block.get('transactions', []):
+            self._index_transaction(tx, block.get('index'))
+
+    def _rebuild_indices(self):
+        """
+        Recompute every chain index from scratch. Only called from
+        resolve_conflicts() when self.chain is replaced wholesale by a
+        longer chain from a peer -- a fork-resolution event, not something
+        that happens per transaction or per mine -- and by anything else
+        that mutates self.chain directly (see the warning in __init__).
+        """
+        self.chain_tx_hashes = set()
+        self.chain_hash_index = {}
+        self.chain_challenge_keys = set()
+        self.chain_response_parents = set()
+        self.chain_references = {}
+        self.chain_all_reference_program_ids = set()
+        self.last_verification_block_index = None
+        for block in self.chain:
+            self._index_block(block)
 
     def register_node(self, address):
         """
@@ -146,6 +254,7 @@ class Blockchain:
                     self.last_processed_block = max(index-1, 0) # if tthey differ in index 0 then it should not become -1
                     break
             self.chain = new_chain
+            self._rebuild_indices()
             return True
 
         return False
@@ -164,20 +273,14 @@ class Blockchain:
 
         :return: the signed envelope, or None if we have no trustworthy reference
         """
-        for block in self.chain:
-            for tx in block['transactions']:
-                if tx.get('transaction_type') != REFERENCE_TX_TYPE:
-                    continue
-                envelope = tx.get('reference_envelope')
-                if not envelope:
-                    continue
-                reference, why = verify_reference(envelope)
-                if reference is None:
-                    print(f"Ignoring untrustworthy reference on chain: {why}")
-                    continue
-                if reference.get('program_id') == program_id:
-                    return envelope
-        return None
+        # O(1): chain_references is maintained incrementally by
+        # _index_transaction() (called from new_block()/resolve_conflicts())
+        # and already only ever holds the first VALID reference seen per
+        # program_id, verified once at indexing time -- see its declaration
+        # in __init__ for the full reasoning. This used to walk the entire
+        # chain, re-verifying every reference transaction's signature, on
+        # every single call.
+        return self.chain_references.get(program_id)
 
     def validate_response_transaction(self, last_block):
         """
@@ -208,17 +311,11 @@ class Blockchain:
                   'be independent.')
             return True
 
-            # Find the matching request transaction in the **entire chain**
+            # Find the matching request transaction. O(1) via chain_hash_index
+            # (tx hash -> tx, maintained incrementally -- see __init__) instead
+            # of walking every block in self.chain looking for a hash match.
         parent_hash = response_transaction.get('parent')
-        request_transaction = None
-
-        for block in self.chain:
-            for transaction in block['transactions']:
-                if transaction.get('hash') == parent_hash:  # Match request transaction
-                    request_transaction = transaction
-                    break
-            if request_transaction:
-                break  # Stop searching once found
+        request_transaction = self.chain_hash_index.get(parent_hash)
 
         # If no matching request transaction is found, reject the chain
         if not request_transaction:
@@ -414,6 +511,7 @@ class Blockchain:
         }
 
         self.chain.append(block)
+        self._index_block(block)
 
         # Clear the transaction pool since all transactions were added to the block
         self.transaction_pool = []
@@ -522,7 +620,7 @@ class Blockchain:
             print(f"Transaction already in pool: {transaction_hash}")
             return self.last_block['index'] + 1
 
-        if any(tx['hash'] == transaction_hash for block in self.chain for tx in block['transactions']):
+        if transaction_hash in self.chain_tx_hashes:
             print(f"Transaction already in blockchain: {transaction_hash}")
             return self.last_block['index'] + 1
 
@@ -540,8 +638,7 @@ class Blockchain:
                         and str(tx.get('function_parameter')) == str(function_parameter))
 
             if (any(_same_challenge(tx) for tx in self.transaction_pool)
-                    or any(_same_challenge(tx)
-                           for block in self.chain for tx in block['transactions'])):
+                    or (program_id, str(function_parameter)) in self.chain_challenge_keys):
                 print(f"Rejecting ZEKRA request: nonce {function_parameter} has "
                       f"already been used for program {program_id!r}")
                 return self.last_block['index'] + 1
@@ -561,8 +658,7 @@ class Blockchain:
                 print(f"ZEKRA response for request {parent} already in pool; dropping duplicate.")
                 return self.last_block['index'] + 1
 
-            if any(_answers_same_request(tx)
-                   for block in self.chain for tx in block['transactions']):
+            if parent in self.chain_response_parents:
                 print(f"ZEKRA response for request {parent} already on chain; dropping duplicate.")
                 return self.last_block['index'] + 1
 
@@ -928,11 +1024,11 @@ def zekra_status():
     """
     info = zekra_integration.status()
     info['known_peer_pubkeys'] = len(blockchain.node_pubkeys)
-    info['references_on_chain'] = sorted({
-        tx['reference_envelope']['reference']['program_id']
-        for block in blockchain.chain for tx in block['transactions']
-        if tx.get('transaction_type') == REFERENCE_TX_TYPE and tx.get('reference_envelope')
-    })
+    # O(1): chain_all_reference_program_ids is maintained incrementally
+    # (see Blockchain.__init__) and reports the same thing this used to
+    # compute by walking the whole chain -- every program_id with a
+    # reference_envelope on chain, valid or not.
+    info['references_on_chain'] = sorted(blockchain.chain_all_reference_program_ids)
     return jsonify(info), 200
 
 
@@ -1008,11 +1104,15 @@ def update_transaction_pool():
     if new_transactions is None:
         return 'Missing transaction pool data', 400
 
-    # Check if transactions are already in the blockchain
-    existing_transaction_hashes = set()
-    for block in blockchain.chain:
-        for tx in block['transactions']:
-            existing_transaction_hashes.add(tx['hash'])
+    # Check if transactions are already in the blockchain. O(1) set lookup
+    # per transaction via chain_tx_hashes (maintained incrementally -- see
+    # Blockchain.__init__) instead of rebuilding this set by walking the
+    # whole chain on every call. This endpoint is hit by every peer's
+    # notify_transaction_pool_update() broadcast after every single mine,
+    # so this was the single most frequently paid O(chain-length) cost in
+    # the whole codebase -- one full chain walk per peer per mine, not just
+    # per mine.
+    existing_transaction_hashes = blockchain.chain_tx_hashes
 
     # Only add transactions that aren't in the blockchain or current pool
     for tx in new_transactions:
@@ -1029,15 +1129,15 @@ def update_transaction_pool():
 def count_verdicts():
     start_time = time.perf_counter()  # Start timing the request
 
-    # Find the latest block with verification transactions
+    # Find the latest block with verification transactions. O(1) via
+    # last_verification_block_index (maintained incrementally -- see
+    # Blockchain.__init__) instead of scanning backward from the chain tip
+    # on every call. Block indices are 1-based and contiguous (new_block()
+    # always sets 'index' to len(self.chain) + 1), so the block's position
+    # in the list is index - 1.
     verification_block = None
-    for block in reversed(blockchain.chain):
-        for transaction in block['transactions']:
-            if transaction['transaction_type'] == "verification":
-                verification_block = block
-                break
-        if verification_block:
-            break
+    if blockchain.last_verification_block_index is not None:
+        verification_block = blockchain.chain[blockchain.last_verification_block_index - 1]
 
     if not verification_block:
         return jsonify({"message": "No verification transactions found in the blockchain."}), 200
