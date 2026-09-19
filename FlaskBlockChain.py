@@ -220,17 +220,30 @@ class Blockchain:
         by replacing our chain with the longest one in the network.
 
         :return: True if our chain was replaced, False if not
-        """
 
+        Timing note: this fans out a GET /chain to every registered neighbour,
+        SEQUENTIALLY, and each of those calls can itself be slow (single-
+        threaded Flask on the peer, a growing chain payload to serialize/
+        transmit, or that peer being mid-resolve_conflicts() itself). None of
+        that was previously visible anywhere -- log_timing_event() only ever
+        recorded mining/proof_generation/verification. Total wall time here,
+        plus the per-neighbour fetch breakdown, is now logged as its own
+        'resolve_conflicts' stage so it can be correlated against
+        total_latency_ms instead of silently vanishing into it.
+        """
+        _rc_t0 = time.time()
         neighbours = self.nodes
         new_chain = None
 
         # We're only looking for chains longer than ours
         max_length = len(self.chain)
+        _per_neighbor_ms = {}
 
         # Grab and verify the chains from all the nodes in our network
         for node in neighbours:
+            _n_t0 = time.time()
             response = requests.get(f'http://{node}/chain')
+            _per_neighbor_ms[node] = round((time.time() - _n_t0) * 1000, 1)
 
             if response.status_code == 200:
                 length = response.json()['length']
@@ -246,8 +259,9 @@ class Blockchain:
                     else:
                         print(f"Rejected chain from {node} due to an invalid response transaction.")
 
-        # Replace our chain if we discovered a new, valid chain longer than ours 
+        # Replace our chain if we discovered a new, valid chain longer than ours
         # Update the last_processed_block to the last processed blocked on the new chain
+        replaced = False
         if new_chain:
             for index, (block1, block2) in enumerate(zip(new_chain, self.chain)):
                 if self.hash(block1) != self.hash(block2):
@@ -255,9 +269,15 @@ class Blockchain:
                     break
             self.chain = new_chain
             self._rebuild_indices()
-            return True
+            replaced = True
 
-        return False
+        zekra_integration.log_timing_event(
+            'resolve_conflicts', node=node_identifier,
+            duration_ms=(time.time() - _rc_t0) * 1000,
+            chain_length=len(self.chain), replaced=replaced,
+            neighbor_count=len(neighbours), per_neighbor_fetch_ms=_per_neighbor_ms)
+
+        return replaced
 
     def find_reference(self, program_id):
         """
@@ -407,19 +427,12 @@ class Blockchain:
             coordinator_node_url = f'http://{request_node_address}/transactions/new'
 
             print("Verification Transaction Before Sending:", verification_transaction)
-            _net_t0 = time.time()
             try:
                 response = requests.post(
                     coordinator_node_url,
                     json=verification_transaction,
                     headers={"Content-Type": "application/json"}
                 )
-                zekra_integration.log_timing_event(
-                    'verification_delivery_post',
-                    program_id=response_transaction.get('program_id'),
-                    request_hash=parent_hash,
-                    duration_ms=(time.time() - _net_t0) * 1000,
-                    node=node_identifier, http_status=response.status_code)
                 if response.status_code == 201:
                     print(
                         f"Verification transaction sent to node {request_node_id}: {response.json()}")
@@ -456,15 +469,33 @@ class Blockchain:
     def notify_neighbors(self):
         """
         Notify all neighbors that the blockchain has been updated by sending the hash of the latest block.
+
+        Timing note: this loop is sequential and blocking, and each neighbour's
+        /notify_change handler runs its OWN resolve_conflicts() inline before
+        replying (see notify_change() below) -- so this call does not return
+        until every neighbour has finished its own consensus fan-out. That
+        makes this the wall-clock cost a mine() call actually pays for
+        propagation, none of which showed up in any previously-logged stage.
+        Logged here as 'notify_neighbors_cascade', with a per-neighbour
+        breakdown, so it can be correlated against total_latency_ms.
         """
         last_block_hash = self.hash(self.last_block)
+        _cascade_t0 = time.time()
+        _per_neighbor_ms = {}
         for node in self.nodes:
+            _n_t0 = time.time()
             try:
                 response = requests.post(f'http://{node}/notify_change', json={'last_block_hash': last_block_hash})
                 if response.status_code == 200:
                     print(f"Notified node {node}, response: {response.json()}")
             except requests.exceptions.RequestException:
                 print(f"Failed to notify node {node}")
+            _per_neighbor_ms[node] = round((time.time() - _n_t0) * 1000, 1)
+        zekra_integration.log_timing_event(
+            'notify_neighbors_cascade', node=node_identifier,
+            duration_ms=(time.time() - _cascade_t0) * 1000,
+            last_block_hash=last_block_hash, neighbor_count=len(self.nodes),
+            per_neighbor_ms=_per_neighbor_ms)
 
     def notify_transaction_pool_update(self):
         """
@@ -730,19 +761,12 @@ class Blockchain:
 
                         print("Response Transaction Before Sending:",
                               self.summarize_transaction(response_transaction))
-                        _net_t0 = time.time()
                         try:
                             response = requests.post(
                                 recipient_node_url,
                                 json=response_transaction,
                                 headers={"Content-Type": "application/json"}
                             )
-                            zekra_integration.log_timing_event(
-                                'response_delivery_post',
-                                program_id=response_transaction.get('program_id'),
-                                request_hash=response_transaction.get('parent'),
-                                duration_ms=(time.time() - _net_t0) * 1000,
-                                node=node_identifier, http_status=response.status_code)
                             if response.status_code == 201:
                                 print(
                                     f"Response transaction sent to node {recipient_node_identifier}: {response.json()}")
@@ -1021,22 +1045,6 @@ def new_transaction():
             'request_initiated', program_id=values.get('program_id'),
             request_hash=_new_tx.get('hash'), duration_ms=0, node=node_identifier)
 
-    # Ground-truth network-arrival timestamps for response/verification
-    # transactions -- logged the instant the HTTP POST lands here, so unlike
-    # the driver's own polling loop this has zero detection lag. duration_ms
-    # is 0 (a timestamp marker, same convention as request_initiated above);
-    # the actual delivery latency is the gap between this and the sender's
-    # own *_delivery_post event, or between this and the round's earlier
-    # stage timestamps.
-    if values.get('transaction_type') == 'response':
-        zekra_integration.log_timing_event(
-            'response_received', program_id=values.get('program_id'),
-            request_hash=values.get('parent'), duration_ms=0, node=node_identifier)
-    elif values.get('transaction_type') == 'verification':
-        zekra_integration.log_timing_event(
-            'verification_received', program_id=values.get('program_id'),
-            request_hash=values.get('parent'), duration_ms=0, node=node_identifier)
-
     response = {'message': f'Transaction will be added to Block {index}'}
     return jsonify(response), 201
 
@@ -1204,25 +1212,6 @@ def count_verdicts():
         "message": verdict_message,
         "time_taken_seconds": final_time
     }
-
-    # Correlate this call to its round for the JSONL timing log. A
-    # verification transaction carries no program_id/request_hash of its own
-    # (see FlaskBlockChain.py's validate_response_transaction -- it's built
-    # from parent_hash alone), so pull them from the original request
-    # transaction via chain_hash_index (O(1), same cache the rest of the
-    # optimization uses) rather than re-scanning anything.
-    _first_verification = next(
-        (t for t in verification_block['transactions'] if t['transaction_type'] == 'verification'),
-        None)
-    _request_hash = _first_verification.get('parent') if _first_verification else None
-    _request_tx = blockchain.chain_hash_index.get(_request_hash) if _request_hash else None
-    zekra_integration.log_timing_event(
-        'count_verdicts',
-        program_id=(_request_tx or {}).get('program_id'),
-        request_hash=_request_hash,
-        duration_ms=elapsed_time * 1000,
-        node=node_identifier,
-        correct=correct_count, incorrect=incorrect_count)
 
     return jsonify(response), 200
 
