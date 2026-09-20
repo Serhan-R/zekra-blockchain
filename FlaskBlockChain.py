@@ -588,34 +588,74 @@ class Blockchain:
             "parent": parent_hash,
         }
 
-        request_node_address = self.node_addresses.get(request_node_id)
+        # We are the original challenger for this round -- our own verification
+        # transaction is addressed back to ourselves. POSTing it to our own
+        # /transactions/new over HTTP self-deadlocks: this code already runs
+        # inside a request this node's single-threaded Flask server is
+        # handling, so a self-directed POST has to wait for a free worker,
+        # and the only worker that could ever become free is this one --
+        # which can't return from THIS call until the POST it is making
+        # completes. Measured against real runs: this node goes completely
+        # unresponsive for ~5.5-8s per round (vs. ~110-580ms for a normal,
+        # externally-delivered vote) before some outer timeout finally breaks
+        # the deadlock -- and since this same node is also the one that calls
+        # /count_verdicts for its own round, that ~6-8s lands squarely on the
+        # round's critical path (count_verdicts doesn't fire until ~6.3-8.9s
+        # after the LAST of the other verifiers' votes has already arrived).
+        # Apply our own vote in-process instead -- this is exactly what
+        # /transactions/new does for an externally-arriving verification
+        # transaction (see its route handler), just without the pointless,
+        # self-defeating network hop.
+        if request_node_id == node_id:
+            self.new_transaction(
+                sender=node_id,
+                recipient=request_node_id,
+                transaction_type="verification",
+                function_name=function_name,
+                function_parameter=verification_response,
+                parent=parent_hash,
+            )
+            zekra_integration.log_timing_event(
+                'verification_delivery_post',
+                program_id=response_transaction.get('program_id'),
+                request_hash=parent_hash,
+                duration_ms=0.0,
+                node=node_identifier, http_status=201)
+            zekra_integration.log_timing_event(
+                'verification_received',
+                program_id=response_transaction.get('program_id'),
+                request_hash=parent_hash, duration_ms=0, node=node_identifier)
+            print("Applied our own verification transaction locally "
+                  "(self-addressed -- no HTTP hop, no self-deadlock).")
+        else:
+            request_node_address = self.node_addresses.get(request_node_id)
 
-        # Send the response transaction if the recipient address is found
-        if request_node_address:
-            coordinator_node_url = f'http://{request_node_address}/transactions/new'
+            # Send the response transaction if the recipient address is found
+            if request_node_address:
+                coordinator_node_url = f'http://{request_node_address}/transactions/new'
 
-            print("Verification Transaction Before Sending:", verification_transaction)
-            _net_t0 = time.time()
-            try:
-                response = requests.post(
-                    coordinator_node_url,
-                    json=verification_transaction,
-                    headers={"Content-Type": "application/json"}
-                )
-                zekra_integration.log_timing_event(
-                    'verification_delivery_post',
-                    program_id=response_transaction.get('program_id'),
-                    request_hash=parent_hash,
-                    duration_ms=(time.time() - _net_t0) * 1000,
-                    node=node_identifier, http_status=response.status_code)
-                if response.status_code == 201:
-                    print(
-                        f"Verification transaction sent to node {request_node_id}: {response.json()}")
-                else:
-                    print(
-                        f"Failed to send verification to {request_node_id}: {response.status_code}")
-            except requests.exceptions.RequestException as e:
-                print(f"Error sending verification to node {request_node_id}: {e}")
+                print("Verification Transaction Before Sending:", verification_transaction)
+                _net_t0 = time.time()
+                try:
+                    response = requests.post(
+                        coordinator_node_url,
+                        json=verification_transaction,
+                        headers={"Content-Type": "application/json"}
+                    )
+                    zekra_integration.log_timing_event(
+                        'verification_delivery_post',
+                        program_id=response_transaction.get('program_id'),
+                        request_hash=parent_hash,
+                        duration_ms=(time.time() - _net_t0) * 1000,
+                        node=node_identifier, http_status=response.status_code)
+                    if response.status_code == 201:
+                        print(
+                            f"Verification transaction sent to node {request_node_id}: {response.json()}")
+                    else:
+                        print(
+                            f"Failed to send verification to {request_node_id}: {response.status_code}")
+                except requests.exceptions.RequestException as e:
+                    print(f"Error sending verification to node {request_node_id}: {e}")
 
         # Check if the response result is correct
         return is_valid
